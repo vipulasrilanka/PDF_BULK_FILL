@@ -18,6 +18,15 @@ from pdf_bulk_fill.pdf_form import (
     is_truthy_checkbox,
     list_form_fields,
 )
+from pdf_bulk_fill.pdf_image_overlay import (
+    RR_FORM_IMAGE_SLOTS,
+    ImageOverlaySpec,
+    add_image_overlays_to_pdf,
+    apply_image_overlays_to_page,
+    fit_rect_preserving_aspect,
+    resolve_image_path,
+    resolve_target_rect,
+)
 from pdf_bulk_fill.pdf_text_overlay import (
     RenderedLine,
     add_text_overlays_to_pdf,
@@ -103,4 +112,11 @@ __all__ = [
     "wrap_shrink_to_fit",
     "apply_text_overlays_to_page",
     "add_text_overlays_to_pdf",
+    "RR_FORM_IMAGE_SLOTS",
+    "ImageOverlaySpec",
+    "fit_rect_preserving_aspect",
+    "resolve_image_path",
+    "resolve_target_rect",
+    "apply_image_overlays_to_page",
+    "add_image_overlays_to_pdf",
 ]
