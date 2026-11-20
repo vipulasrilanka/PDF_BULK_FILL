@@ -22,6 +22,9 @@ dev = [
     "pytest-cov>=5.0.0",
 ]
 
+[project.scripts]
+pdf-bulk-fill = "pdf_bulk_fill.cli:main"
+
 [tool.setuptools.packages.find]
 where = ["src"]
 

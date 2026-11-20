@@ -45,6 +45,14 @@ from pdf_bulk_fill.preprocess import (
     split_for_comb,
     validate_field_value,
 )
+from pdf_bulk_fill.runner import (
+    BatchSummary,
+    RecordResult,
+    render_record_pdf,
+    resolve_record_payload,
+    run_batch,
+    sanitize_filename_part,
+)
 from pdf_bulk_fill.session import (
     SessionConfig,
     SourceFileEntry,
@@ -119,4 +127,10 @@ __all__ = [
     "resolve_target_rect",
     "apply_image_overlays_to_page",
     "add_image_overlays_to_pdf",
+    "RecordResult",
+    "BatchSummary",
+    "sanitize_filename_part",
+    "resolve_record_payload",
+    "render_record_pdf",
+    "run_batch",
 ]
