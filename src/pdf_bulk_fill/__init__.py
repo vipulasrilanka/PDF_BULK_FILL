@@ -17,6 +17,17 @@ from pdf_bulk_fill.session import (
     resolve_source_path,
     save_session,
 )
+from pdf_bulk_fill.template_parser import (
+    DEFAULT_OVERLAY_SHEET,
+    DEFAULT_RECORD_SHEET,
+    OverlayDefinition,
+    RecordEntry,
+    apply_concat,
+    get_required_source_files,
+    load_overlay_definitions,
+    load_record_list,
+    parse_kv_pairs,
+)
 
 __version__ = "0.1.0"
 
@@ -37,4 +48,13 @@ __all__ = [
     "WorkbookStore",
     "open_workbook",
     "normalize_key",
+    "DEFAULT_OVERLAY_SHEET",
+    "DEFAULT_RECORD_SHEET",
+    "RecordEntry",
+    "OverlayDefinition",
+    "load_record_list",
+    "load_overlay_definitions",
+    "get_required_source_files",
+    "apply_concat",
+    "parse_kv_pairs",
 ]
