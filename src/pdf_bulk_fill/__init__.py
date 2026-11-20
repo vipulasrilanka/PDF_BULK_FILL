@@ -10,6 +10,14 @@ from pdf_bulk_fill.errors import (
     TemplateParseError,
 )
 from pdf_bulk_fill.excel_loader import WorkbookStore, normalize_key, open_workbook
+from pdf_bulk_fill.pdf_form import (
+    RR_FORM_COMB_GROUPS,
+    apply_form_fields_to_page,
+    expand_comb_groups,
+    fill_acroform,
+    is_truthy_checkbox,
+    list_form_fields,
+)
 from pdf_bulk_fill.preprocess import (
     apply_preprocess,
     extract_number,
@@ -73,4 +81,10 @@ __all__ = [
     "format_currency",
     "split_for_comb",
     "validate_field_value",
+    "RR_FORM_COMB_GROUPS",
+    "is_truthy_checkbox",
+    "expand_comb_groups",
+    "list_form_fields",
+    "apply_form_fields_to_page",
+    "fill_acroform",
 ]
