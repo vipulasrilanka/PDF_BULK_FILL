@@ -18,6 +18,15 @@ from pdf_bulk_fill.pdf_form import (
     is_truthy_checkbox,
     list_form_fields,
 )
+from pdf_bulk_fill.pdf_text_overlay import (
+    RenderedLine,
+    add_text_overlays_to_pdf,
+    apply_text_overlays_to_page,
+    measure_to_points,
+    resolve_font_name,
+    resolve_line_height,
+    wrap_shrink_to_fit,
+)
 from pdf_bulk_fill.preprocess import (
     apply_preprocess,
     extract_number,
@@ -87,4 +96,11 @@ __all__ = [
     "list_form_fields",
     "apply_form_fields_to_page",
     "fill_acroform",
+    "RenderedLine",
+    "measure_to_points",
+    "resolve_font_name",
+    "resolve_line_height",
+    "wrap_shrink_to_fit",
+    "apply_text_overlays_to_page",
+    "add_text_overlays_to_pdf",
 ]
