@@ -221,3 +221,13 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# PDF_BULK_FILL local data & temporary files
+.DS_Store
+session.json
+~temp~*.xlsx
+data/input/*
+!data/input/.gitkeep
+data/output/*
+!data/output/.gitkeep
+
