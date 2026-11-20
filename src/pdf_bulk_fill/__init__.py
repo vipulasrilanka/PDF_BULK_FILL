@@ -9,6 +9,7 @@ from pdf_bulk_fill.errors import (
     SessionError,
     TemplateParseError,
 )
+from pdf_bulk_fill.excel_loader import WorkbookStore, normalize_key, open_workbook
 from pdf_bulk_fill.session import (
     SessionConfig,
     SourceFileEntry,
@@ -33,4 +34,7 @@ __all__ = [
     "load_session",
     "save_session",
     "resolve_source_path",
+    "WorkbookStore",
+    "open_workbook",
+    "normalize_key",
 ]
