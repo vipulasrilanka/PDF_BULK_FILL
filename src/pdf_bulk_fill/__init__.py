@@ -10,6 +10,15 @@ from pdf_bulk_fill.errors import (
     TemplateParseError,
 )
 from pdf_bulk_fill.excel_loader import WorkbookStore, normalize_key, open_workbook
+from pdf_bulk_fill.preprocess import (
+    apply_preprocess,
+    extract_number,
+    format_currency,
+    format_date,
+    format_number,
+    split_for_comb,
+    validate_field_value,
+)
 from pdf_bulk_fill.session import (
     SessionConfig,
     SourceFileEntry,
@@ -57,4 +66,11 @@ __all__ = [
     "get_required_source_files",
     "apply_concat",
     "parse_kv_pairs",
+    "apply_preprocess",
+    "extract_number",
+    "format_date",
+    "format_number",
+    "format_currency",
+    "split_for_comb",
+    "validate_field_value",
 ]
