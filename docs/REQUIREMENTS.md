@@ -38,10 +38,15 @@ Build a clean, extensible Python application to bulk-fill PDF documents from Exc
 - Render crisp appearances so every character sits centered inside its box across macOS Preview, Adobe Acrobat, web browsers, and printing.
 - Support both editable and flattened (print-ready) PDF output modes.
 
-### FR-4: Employee ID Card Images (Front & Back)
-- Insert two images (ID card **front** and **back**) into designated bounding boxes in the upper section of `RR-Form.pdf`.
-- Preserve aspect ratio, auto-scale and center within each target rectangle, and support common formats (`.jpg`, `.jpeg`, `.png`).
-- Resolve image file paths from Excel columns or a configured directory/naming pattern, handling missing images gracefully with clear warnings/errors.
+### FR-4: Generic DocType-Matched Data-Driven & Constant Image Overlays
+- Support two line-by-line `Type=Image` modes in `TEMPLATE.xlsx` (`Overlay` sheet):
+  1. **Data-Driven Images** (e.g., Old & New Sri Lankan NIC front/back):
+     - `TEMPLATE.xlsx` defines slot geometry (`X`, `Y`, `Width`, `Height`, `Origin`) and accepted `DocType` in `Param`, plus the source workbook/column in `Content`.
+     - The data workbook (`employees.xlsx`) stores image asset properties (`<DocType=...><FileName=...><Location=...><Rotation=...><KeepAspect=...>`, with defaults `Location=""`, `Rotation=0`, `KeepAspect=True`).
+     - If `image.DocType != slot.DocType` (or cell is empty), log a warning and skip the row cleanly.
+  2. **Constant / Static Images** (e.g., company logo or rubber stamp):
+     - `TEMPLATE.xlsx` defines `FileName`, optional `Location`, `Rotation`, `KeepAspect` directly in `Content` and placement (`X`, `Y`, `Width`, `Height`, `Origin`) in `Param`.
+- Apply EXIF orientation normalization and explicit clockwise `Rotation`, preserve aspect ratio when `KeepAspect=True`, and support common formats (`.jpg`, `.jpeg`, `.png`, `.bmp`, `.webp`).
 
 ### FR-5: Legacy Coordinate-Based Text Overlays
 - Support drawing text at explicit `(X, Y)` coordinates with `pt`, `mm`, and `in` units.

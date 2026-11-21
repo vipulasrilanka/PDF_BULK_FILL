@@ -1,8 +1,9 @@
-"""Employee ID card (front & back) and general image overlay support via PyMuPDF + Pillow."""
+"""Generic DocType-matched data-driven and constant image overlays via PyMuPDF + Pillow."""
 
 from __future__ import annotations
 
 import io
+import logging
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping, Sequence
@@ -12,26 +13,90 @@ from PIL import Image, ImageOps, UnidentifiedImageError
 
 from pdf_bulk_fill.errors import ImageOverlayError
 from pdf_bulk_fill.pdf_text_overlay import measure_to_points
+from pdf_bulk_fill.template_parser import parse_kv_pairs
+
+logger = logging.getLogger(__name__)
 
 SUPPORTED_IMAGE_EXTENSIONS = (".jpg", ".jpeg", ".png", ".bmp", ".webp")
 
-# Preset bounding boxes (top-left coordinates in PDF points) for RR-Form.pdf (A4: 595.2 x 841.8)
-# Upper blank area spans roughly y=85..485, x=40..555.
-RR_FORM_IMAGE_SLOTS: dict[str, tuple[float, float, float, float]] = {
-    "ID_FRONT": (120.0, 95.0, 475.0, 275.0),
-    "ID_BACK": (120.0, 295.0, 475.0, 475.0),
-    "ID_LEFT": (45.0, 140.0, 290.0, 390.0),
-    "ID_RIGHT": (305.0, 140.0, 550.0, 390.0),
-}
-
 
 @dataclass(frozen=True)
-class ImageOverlaySpec:
-    """Resolved image overlay instruction."""
+class ImageAsset:
+    """Properties of an input image asset (from data workbook or constant template row)."""
 
-    image_path: Path
-    target_rect: pymupdf.Rect
+    file_name: str
+    doc_type: str | None = None
+    location: str = ""
+    rotation: float = 0.0
     keep_aspect: bool = True
+
+
+def _parse_bool(value: Any, *, default: bool = True) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    raw = str(value).strip().lower()
+    if raw in ("true", "1", "yes", "y", "on"):
+        return True
+    if raw in ("false", "0", "no", "n", "off"):
+        return False
+    raise ImageOverlayError(f"Invalid boolean value for KeepAspect: {value!r}")
+
+
+def parse_image_asset(raw: Any) -> ImageAsset | None:
+    """Parse an ImageAsset from an ImageAsset instance, a dict, or a ``<key=value>`` string.
+
+    Returns ``None`` when the input is empty/``None`` (allowing the caller to skip cleanly).
+    """
+    if raw is None:
+        return None
+    if isinstance(raw, ImageAsset):
+        return raw
+
+    if isinstance(raw, str):
+        stripped = raw.strip()
+        if not stripped:
+            return None
+        parsed = parse_kv_pairs(stripped)
+        if not parsed:
+            raise ImageOverlayError(
+                f"Malformed image metadata {raw!r}; expected '<DocType=...><FileName=...>...'."
+            )
+        data: Mapping[str, Any] = parsed
+    elif isinstance(raw, Mapping):
+        data = raw
+    else:
+        raise ImageOverlayError(f"Unsupported image metadata type: {type(raw).__name__}")
+
+    raw_file = data.get("FileName")
+    file_name = "" if raw_file is None else str(raw_file).strip()
+    if not file_name:
+        raise ImageOverlayError("Image metadata is missing required 'FileName' property.")
+
+    raw_doc_type = data.get("DocType")
+    doc_type = str(raw_doc_type).strip() if raw_doc_type is not None and str(raw_doc_type).strip() else None
+
+    raw_location = data.get("Location")
+    location = "" if raw_location is None else str(raw_location).strip()
+
+    raw_rotation = data.get("Rotation", 0.0)
+    try:
+        rotation = float(raw_rotation) if raw_rotation is not None and str(raw_rotation).strip() != "" else 0.0
+    except ValueError as exc:
+        raise ImageOverlayError(f"Invalid Rotation value: {raw_rotation!r}") from exc
+
+    keep_aspect = _parse_bool(data.get("KeepAspect"), default=True)
+
+    return ImageAsset(
+        file_name=file_name,
+        doc_type=doc_type,
+        location=location,
+        rotation=rotation,
+        keep_aspect=keep_aspect,
+    )
 
 
 def fit_rect_preserving_aspect(
@@ -53,61 +118,72 @@ def fit_rect_preserving_aspect(
     return pymupdf.Rect(x0, y0, x0 + fitted_w, y0 + fitted_h)
 
 
-def resolve_image_path(
-    raw_path: str | Path,
-    *,
-    base_dir: str | Path | None = None,
-    record_key: str | None = None,
-) -> Path:
-    """Resolve an image path from an absolute/relative path or ``{key}`` template pattern.
-
-    If the resolved path has no extension and does not exist directly, probes common
-    image extensions (``.jpg``, ``.jpeg``, ``.png``, ``.bmp``, ``.webp``).
-    """
-    path_str = str(raw_path).strip()
-    if not path_str:
-        raise ImageOverlayError("Empty image path.")
-
-    if record_key is not None and "{key}" in path_str:
-        path_str = path_str.replace("{key}", str(record_key))
-
-    candidate = Path(path_str)
-    if not candidate.is_absolute() and base_dir is not None:
-        candidate = Path(base_dir) / candidate
-
+def _probe_existing_file(candidate: Path) -> Path | None:
     if candidate.exists() and candidate.is_file():
         return candidate
-
     if not candidate.suffix:
         for ext in SUPPORTED_IMAGE_EXTENSIONS:
             with_ext = candidate.with_suffix(ext)
             if with_ext.exists() and with_ext.is_file():
                 return with_ext
+    return None
 
-    raise ImageOverlayError(f"Image file not found: {candidate}")
+
+def resolve_image_file(
+    file_name: str | Path,
+    *,
+    location: str | Path = "",
+    base_dir: str | Path | None = None,
+) -> Path:
+    """Resolve an image path from ``file_name``, optional ``location``, and ``base_dir``.
+
+    Probes common image extensions when ``file_name`` has no suffix.
+    """
+    name_str = str(file_name).strip()
+    if not name_str:
+        raise ImageOverlayError("Empty image file name.")
+
+    name_path = Path(name_str)
+    loc_str = str(location).strip() if location is not None else ""
+    loc_path = Path(loc_str) if loc_str else None
+    base_path = Path(base_dir) if base_dir is not None else None
+
+    candidates: list[Path] = []
+    if name_path.is_absolute():
+        candidates.append(name_path)
+    elif loc_path is not None:
+        if loc_path.is_absolute():
+            candidates.append(loc_path / name_path)
+        else:
+            if base_path is not None:
+                candidates.append(base_path / loc_path / name_path)
+                if base_path.name == loc_path.name:
+                    candidates.append(base_path / name_path)
+            candidates.append(loc_path / name_path)
+    elif base_path is not None:
+        candidates.append(base_path / name_path)
+    else:
+        candidates.append(name_path)
+
+    for candidate in candidates:
+        found = _probe_existing_file(candidate)
+        if found is not None:
+            return found
+
+    raise ImageOverlayError(f"Image file not found: {candidates[0]}")
 
 
 def resolve_target_rect(
     params: Mapping[str, Any],
     *,
     page_height: float,
-    slots: Mapping[str, tuple[float, float, float, float]] = RR_FORM_IMAGE_SLOTS,
 ) -> pymupdf.Rect:
-    """Compute a PyMuPDF target Rect from either a named ``Slot`` or explicit coordinates."""
-    slot_name = params.get("Slot")
-    if isinstance(slot_name, str) and slot_name.strip():
-        key = slot_name.strip().upper()
-        if key not in slots:
-            raise ImageOverlayError(
-                f"Unknown image slot '{slot_name}'. Valid slots: {', '.join(sorted(slots))}."
-            )
-        return pymupdf.Rect(*slots[key])
-
+    """Compute a PyMuPDF target Rect from explicit ``X, Y, Width, Height`` (and optional ``Origin``)."""
     required = ("X", "Y", "Width", "Height")
     missing = [k for k in required if k not in params]
     if missing:
         raise ImageOverlayError(
-            f"Image overlay requires 'Slot' or all of {required}; missing: {', '.join(missing)}."
+            f"Image overlay requires all of {required}; missing: {', '.join(missing)}."
         )
 
     x = measure_to_points(params["X"])
@@ -127,13 +203,20 @@ def resolve_target_rect(
     return pymupdf.Rect(x, y0, x + width, y0 + height)
 
 
-def _load_normalized_image_bytes(image_path: Path) -> tuple[bytes, int, int]:
-    """Load an image with Pillow, apply EXIF orientation, and return PNG bytes + dimensions."""
+def _load_normalized_image_bytes(
+    image_path: Path,
+    *,
+    rotation: float = 0.0,
+) -> tuple[bytes, int, int]:
+    """Load an image with Pillow, apply EXIF transpose + clockwise rotation, and return PNG bytes."""
     try:
         with Image.open(image_path) as img:
             normalized = ImageOps.exif_transpose(img)
             if normalized.mode not in ("RGB", "RGBA"):
                 normalized = normalized.convert("RGB")
+            if rotation % 360 != 0:
+                # Pillow rotates counter-clockwise; negate for intuitive clockwise degrees
+                normalized = normalized.rotate(-rotation, expand=True)
             width, height = normalized.size
             buf = io.BytesIO()
             normalized.save(buf, format="PNG")
@@ -147,51 +230,77 @@ def apply_image_overlays_to_page(
     image_overlays: Sequence[Mapping[str, Any]],
     *,
     base_dir: str | Path | None = None,
-    record_key: str | None = None,
     skip_missing: bool = False,
+    warnings_out: list[str] | None = None,
 ) -> list[str]:
-    """Insert one or more image overlays onto an open PyMuPDF page.
+    """Process and insert image overlays onto an open PyMuPDF page strictly line-by-line.
 
     Each entry expects:
-        ``{"name": ..., "path": ..., "param": {"Slot": "ID_FRONT"} or {"X": ..., "Y": ..., "Width": ..., "Height": ...}}``
+        ``{"name": ..., "asset": ImageAsset | dict | str | None, "param": {"X": ..., "Y": ..., "Width": ..., "Height": ..., "Origin": ..., "DocType": ...}}``
+
+    When ``param["DocType"]`` is set, the row is placed only if ``asset.doc_type`` matches
+    (case-insensitive); otherwise a warning is logged and the row is skipped.
 
     Returns:
-        List of overlay names successfully inserted.
+        List of overlay names inserted onto the page.
     """
     inserted: list[str] = []
     page_height = page.rect.height
 
     for entry in image_overlays:
         name = str(entry.get("name", "image"))
-        raw_path = entry.get("path", entry.get("string"))
         params = entry.get("param")
         if not isinstance(params, Mapping):
             raise ImageOverlayError(f"Image overlay '{name}' is missing required 'param' mapping.")
 
+        asset = parse_image_asset(entry.get("asset"))
+        if asset is None:
+            msg = f"Skipping image overlay '{name}': no image metadata provided."
+            logger.warning(msg)
+            if warnings_out is not None:
+                warnings_out.append(msg)
+            continue
+
+        expected_doc_type = params.get("DocType")
+        if expected_doc_type is not None and str(expected_doc_type).strip():
+            expected_norm = str(expected_doc_type).strip().upper()
+            actual_norm = (asset.doc_type or "").strip().upper()
+            if actual_norm != expected_norm:
+                msg = (
+                    f"Skipping image overlay '{name}': image DocType "
+                    f"'{asset.doc_type or ''}' does not match slot DocType '{expected_doc_type}'."
+                )
+                logger.warning(msg)
+                if warnings_out is not None:
+                    warnings_out.append(msg)
+                continue
+
         try:
-            resolved_path = resolve_image_path(
-                "" if raw_path is None else raw_path,
+            resolved_path = resolve_image_file(
+                asset.file_name,
+                location=asset.location,
                 base_dir=base_dir,
-                record_key=record_key,
             )
-        except ImageOverlayError:
+        except ImageOverlayError as exc:
             if skip_missing:
+                msg = f"Skipping missing image overlay '{name}': {exc}"
+                logger.warning(msg)
+                if warnings_out is not None:
+                    warnings_out.append(msg)
                 continue
             raise
 
         target_rect = resolve_target_rect(params, page_height=page_height)
-        img_bytes, img_w, img_h = _load_normalized_image_bytes(resolved_path)
-
-        keep_aspect = params.get("KeepAspect", True)
-        if isinstance(keep_aspect, str):
-            keep_aspect = keep_aspect.strip().lower() not in ("false", "0", "no")
+        img_bytes, img_w, img_h = _load_normalized_image_bytes(
+            resolved_path, rotation=asset.rotation
+        )
 
         dest_rect = (
             fit_rect_preserving_aspect(target_rect, img_w, img_h)
-            if keep_aspect
+            if asset.keep_aspect
             else target_rect
         )
-        page.insert_image(dest_rect, stream=img_bytes, keep_proportion=bool(keep_aspect))
+        page.insert_image(dest_rect, stream=img_bytes, keep_proportion=asset.keep_aspect)
         inserted.append(name)
 
     return inserted
@@ -204,8 +313,8 @@ def add_image_overlays_to_pdf(
     *,
     page_index: int = 0,
     base_dir: str | Path | None = None,
-    record_key: str | None = None,
     skip_missing: bool = False,
+    warnings_out: list[str] | None = None,
 ) -> list[str]:
     """Open ``template_pdf``, place image overlays on ``page_index``, and save to ``output_pdf``."""
     src_path = Path(template_pdf)
@@ -222,8 +331,8 @@ def add_image_overlays_to_pdf(
             doc[page_index],
             image_overlays,
             base_dir=base_dir,
-            record_key=record_key,
             skip_missing=skip_missing,
+            warnings_out=warnings_out,
         )
         dst_path = Path(output_pdf)
         dst_path.parent.mkdir(parents=True, exist_ok=True)

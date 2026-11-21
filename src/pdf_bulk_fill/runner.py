@@ -44,6 +44,7 @@ class RecordResult:
     output_path: Path | None
     success: bool
     error: str | None = None
+    warnings: tuple[str, ...] = ()
 
 
 @dataclass
@@ -69,7 +70,6 @@ def _resolve_raw_value(
 ) -> str:
     """Fetch the raw string value for a single OverlayDefinition and RecordEntry."""
     content = overlay.content
-    content_type = overlay.content_type
 
     if "File" in content:
         file_name = str(content["File"])
@@ -82,9 +82,6 @@ def _resolve_raw_value(
                 f"Primary key '{record.key}' not found in {file_name}[{sheet_name}:{key_col}]."
             )
         return value
-
-    if content_type == "Image":
-        return str(content.get("Path", content.get("Text", "")))
 
     return str(content.get("Text", ""))
 
@@ -103,6 +100,22 @@ def resolve_record_payload(
     concat_targets: list[dict[str, Any]] = []
 
     for overlay in overlays:
+        if overlay.content_type == "Image":
+            if "File" in overlay.content:
+                # Data-driven image: cell in source workbook contains <DocType=...><FileName=...>
+                asset_spec: Any = _resolve_raw_value(overlay, record, store)
+            else:
+                # Constant/static image: properties defined directly in TEMPLATE.xlsx Content
+                asset_spec = overlay.content
+            image_overlays.append(
+                {
+                    "name": overlay.name,
+                    "asset": asset_spec,
+                    "param": overlay.params or {},
+                }
+            )
+            continue
+
         raw_val = _resolve_raw_value(overlay, record, store)
         processed_val = apply_preprocess(raw_val, overlay.preprocess)
 
@@ -110,15 +123,7 @@ def resolve_record_payload(
             apply_concat(concat_targets, overlay.name, processed_val)
             continue
 
-        if overlay.content_type == "Image":
-            image_overlays.append(
-                {
-                    "name": overlay.name,
-                    "path": processed_val,
-                    "param": overlay.params or {},
-                }
-            )
-        elif overlay.content_type == "FormField":
+        if overlay.content_type == "FormField":
             params = overlay.params or {}
             field_name = str(params.get("Field", overlay.name))
             entry = {"name": overlay.name, "field": field_name, "string": processed_val}
@@ -150,8 +155,8 @@ def render_record_pdf(
     page_index: int = 0,
     flatten: bool = False,
     image_base_dir: str | Path | None = None,
-    record_key: str | None = None,
     skip_missing_images: bool = False,
+    warnings_out: list[str] | None = None,
 ) -> Path:
     """Render a single output PDF combining images, coordinate text, and AcroForm fields."""
     src_path = Path(template_pdf)
@@ -171,8 +176,8 @@ def render_record_pdf(
                 page,
                 image_overlays,
                 base_dir=image_base_dir,
-                record_key=record_key,
                 skip_missing=skip_missing_images,
+                warnings_out=warnings_out,
             )
 
         if text_overlays:
@@ -265,6 +270,7 @@ def run_batch(
                 f"-{sanitize_filename_part(record.identifier)}.pdf"
             )
             target_pdf = out_dir / filename
+            record_warnings: list[str] = []
             try:
                 form_fields, text_overlays, image_overlays = resolve_record_payload(
                     record, overlays, store
@@ -278,8 +284,8 @@ def run_batch(
                     page_index=page_index,
                     flatten=flatten,
                     image_base_dir=img_base_dir,
-                    record_key=record.key,
                     skip_missing_images=skip_missing_images,
+                    warnings_out=record_warnings,
                 )
                 results.append(
                     RecordResult(
@@ -287,6 +293,7 @@ def run_batch(
                         identifier=record.identifier,
                         output_path=rendered_path,
                         success=True,
+                        warnings=tuple(record_warnings),
                     )
                 )
                 succeeded += 1
@@ -298,6 +305,7 @@ def run_batch(
                         output_path=None,
                         success=False,
                         error=str(exc),
+                        warnings=tuple(record_warnings),
                     )
                 )
                 failed += 1

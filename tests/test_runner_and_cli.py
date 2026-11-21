@@ -13,12 +13,10 @@ from PIL import Image, ImageDraw
 from pdf_bulk_fill import (
     BatchSummary,
     PdfRenderError,
-    SessionConfig,
     load_session,
     render_record_pdf,
     run_batch,
     sanitize_filename_part,
-    save_session,
 )
 from pdf_bulk_fill.cli import main as cli_main
 from pdf_bulk_fill.gui import pick_excel_file, pick_pdf_file, prompt_password
@@ -26,48 +24,56 @@ from pdf_bulk_fill.gui import pick_excel_file, pick_pdf_file, prompt_password
 RR_FORM_PATH = Path(__file__).resolve().parent.parent / "templates" / "pdf" / "RR-Form.pdf"
 
 
-def _make_id_image(path: Path, color: tuple[int, int, int], label: str) -> Path:
-    img = Image.new("RGB", (400, 250), color=color)
+def _make_id_image(
+    path: Path, size: tuple[int, int], color: tuple[int, int, int], label: str
+) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    img = Image.new("RGB", size, color=color)
     draw = ImageDraw.Draw(img)
-    draw.rectangle([8, 8, 392, 242], outline=(20, 40, 80), width=4)
-    draw.text((120, 115), label, fill=(10, 10, 10))
+    draw.rectangle([8, 8, size[0] - 8, size[1] - 8], outline=(20, 40, 80), width=4)
+    draw.text((20, size[1] // 2 - 10), label, fill=(10, 10, 10))
     img.save(path)
     return path
 
 
 def _build_rr_form_fixture(base_dir: Path) -> tuple[Path, Path, Path]:
-    """Create a complete employees.xlsx, TEMPLATE.xlsx, and front/back ID images."""
+    """Create employees.xlsx (mixed NEW + OLD NICs), unified TEMPLATE.xlsx, ID images & logo."""
     img_dir = base_dir / "ids"
-    img_dir.mkdir(parents=True, exist_ok=True)
-    _make_id_image(img_dir / "1001_front.png", (215, 232, 255), "1001 FRONT")
-    _make_id_image(img_dir / "1001_back.png", (225, 245, 220), "1001 BACK")
-    _make_id_image(img_dir / "1002_front.jpg", (255, 235, 215), "1002 FRONT")
-    _make_id_image(img_dir / "1002_back.jpg", (245, 225, 255), "1002 BACK")
+    _make_id_image(img_dir / "1001_front.png", (640, 400), (215, 232, 255), "1001 NEW FRONT")
+    _make_id_image(img_dir / "1001_back.png", (640, 400), (225, 245, 220), "1001 NEW BACK")
+    _make_id_image(img_dir / "1002_front.jpg", (400, 620), (250, 241, 208), "1002 OLD FRONT")
+    _make_id_image(img_dir / "1002_back.jpg", (400, 620), (250, 241, 208), "1002 OLD BACK")
+    _make_id_image(base_dir / "logo.png", (180, 60), (30, 64, 175), "LOGO")
 
-    # Source employee workbook
+    # Source employee workbook with FrontImage (Col N) and BackImage (Col O) metadata
     emp_xlsx = base_dir / "employees.xlsx"
     wb = openpyxl.Workbook()
     ws = wb.active
     ws.title = "Employees"
     ws.append([
         "EmpID", "SerialNo", "Zone", "EmpNo", "MemNo", "NIC",
-        "FullName", "NameINI", "Mobile", "Email", "Internet", "SMS", "CertDate",
+        "FullName", "NameINI", "Mobile", "Email", "Internet", "SMS",
+        "CertDate", "FrontImage", "BackImage",
     ])
     ws.append([
         1001, "0001", "A", "123456", "000789", "199012345678",
         "don kamal bandara wickramasinghe mudiyanselage perera",
         "d. k. b. w. m. perera",
         "0771234567", "kamal@example.com", "Yes", "Yes", "2026-11-21 00:00:00",
+        "<DocType=NEW><FileName=1001_front.png><Location=ids><Rotation=0><KeepAspect=True>",
+        "<DocType=NEW><FileName=1001_back.png><Location=ids><Rotation=0><KeepAspect=True>",
     ])
     ws.append([
         1002, "0002", "B", "654321", "000321", "921234567V",
         "nimal silva", "n. silva",
         "0719876543", "nimal@example.com", "Yes", "No", "2026-11-21 00:00:00",
+        "<DocType=OLD><FileName=1002_front.jpg><Location=ids><Rotation=0><KeepAspect=True>",
+        "<DocType=OLD><FileName=1002_back.jpg><Location=ids><Rotation=0><KeepAspect=True>",
     ])
     wb.save(emp_xlsx)
     wb.close()
 
-    # TEMPLATE.xlsx
+    # Unified TEMPLATE.xlsx covering BOTH OLD (side-by-side) and NEW (top-bottom) + constant logo
     tpl_xlsx = base_dir / "RR_TEMPLATE.xlsx"
     twb = openpyxl.Workbook()
     data_ws = twb.active
@@ -90,16 +96,21 @@ def _build_rr_form_fixture(base_dir: Path) -> tuple[Path, Path, Path]:
         (9, "Email", "<Type=FormField><File=employees.xlsx><Sheet=Employees><PrimaryKey=A><Value=J>", "<Field=Email>", "<Function=changeTextCase(text, UPPER)>"),
         (10, "Internet", "<Type=FormField><File=employees.xlsx><Sheet=Employees><PrimaryKey=A><Value=K>", "<Field=Internet>", None),
         (11, "SMS", "<Type=FormField><File=employees.xlsx><Sheet=Employees><PrimaryKey=A><Value=L>", "<Field=SMS>", None),
-        (12, "IDFront", "<Type=Image><Path={key}_front>", "<Slot=ID_FRONT>", None),
-        (13, "IDBack", "<Type=Image><Path={key}_back>", "<Slot=ID_BACK>", None),
-        (14, "CertDate", "<Type=File><File=employees.xlsx><Sheet=Employees><PrimaryKey=A><Value=M>", "<X=65><Y=68><Font=Helvetica><FontSize=10>", "<Function=FormatDate(text, %Y/%m/%d)>"),
+        # 4 DocType-matched NIC slots (2 OLD side-by-side + 2 NEW top-bottom)
+        (12, "IDFront_old", "<Type=Image><File=employees.xlsx><Sheet=Employees><PrimaryKey=A><Value=N>", "<X=45><Y=140><Width=245><Height=250><Origin=top-left><DocType=OLD>", None),
+        (13, "IDBack_old", "<Type=Image><File=employees.xlsx><Sheet=Employees><PrimaryKey=A><Value=O>", "<X=305><Y=140><Width=245><Height=250><Origin=top-left><DocType=OLD>", None),
+        (14, "IDFront_new", "<Type=Image><File=employees.xlsx><Sheet=Employees><PrimaryKey=A><Value=N>", "<X=120><Y=95><Width=355><Height=180><Origin=top-left><DocType=NEW>", None),
+        (15, "IDBack_new", "<Type=Image><File=employees.xlsx><Sheet=Employees><PrimaryKey=A><Value=O>", "<X=120><Y=295><Width=355><Height=180><Origin=top-left><DocType=NEW>", None),
+        # Constant static company logo (no Excel data file)
+        (16, "CompanyLogo", "<Type=Image><FileName=logo.png><Rotation=0><KeepAspect=True>", "<X=35><Y=15><Width=50><Height=20><Origin=top-left>", None),
+        (17, "CertDate", "<Type=File><File=employees.xlsx><Sheet=Employees><PrimaryKey=A><Value=M>", "<X=65><Y=68><Font=Helvetica><FontSize=10>", "<Function=FormatDate(text, %Y/%m/%d)>"),
     ]
     for r in rows:
         ov_ws.append(list(r))
     twb.save(tpl_xlsx)
     twb.close()
 
-    return tpl_xlsx, emp_xlsx, img_dir
+    return tpl_xlsx, emp_xlsx, base_dir
 
 
 def test_sanitize_filename_part() -> None:
@@ -107,8 +118,8 @@ def test_sanitize_filename_part() -> None:
     assert sanitize_filename_part("   ") == "record"
 
 
-def test_end_to_end_rr_form_batch_editable_and_flattened(tmp_path: Path) -> None:
-    tpl_xlsx, _, img_dir = _build_rr_form_fixture(tmp_path)
+def test_end_to_end_rr_form_batch_mixed_old_and_new_nics(tmp_path: Path) -> None:
+    tpl_xlsx, _, img_base_dir = _build_rr_form_fixture(tmp_path)
     out_dir = tmp_path / "out_editable"
     session_out = tmp_path / "saved_session.json"
 
@@ -117,7 +128,7 @@ def test_end_to_end_rr_form_batch_editable_and_flattened(tmp_path: Path) -> None
         tpl_xlsx,
         out_dir,
         source_dir=tmp_path,
-        image_dir=img_dir,
+        image_dir=img_base_dir,
         flatten=False,
         save_session_path=session_out,
     )
@@ -127,6 +138,10 @@ def test_end_to_end_rr_form_batch_editable_and_flattened(tmp_path: Path) -> None
     assert summary.failed == 0
     assert session_out.exists()
 
+    # Each record skipped 2 non-matching NIC slots with warnings
+    assert len(summary.results[0].warnings) == 2
+    assert len(summary.results[1].warnings) == 2
+
     loaded_session = load_session(session_out)
     assert loaded_session.source_files[0].name == "employees.xlsx"
 
@@ -135,7 +150,7 @@ def test_end_to_end_rr_form_batch_editable_and_flattened(tmp_path: Path) -> None
     assert pdf1.exists()
     assert pdf2.exists()
 
-    # Verify comb fields, checkboxes, date overlay, and embedded ID images in PDF 1
+    # Verify comb fields, checkboxes, date overlay, and 3 embedded images (2 NIC + 1 logo)
     orig_doc = pymupdf.open(RR_FORM_PATH)
     orig_img_count = len(orig_doc[0].get_images())
     orig_doc.close()
@@ -152,18 +167,18 @@ def test_end_to_end_rr_form_batch_editable_and_flattened(tmp_path: Path) -> None
         assert widgets["Internet"] == "Yes"
         assert widgets["SMS"] == "Yes"
         assert "2026/11/21" in doc1[0].get_text()
-        assert len(doc1[0].get_images()) >= orig_img_count + 2
+        assert len(doc1[0].get_images()) >= orig_img_count + 3
     finally:
         doc1.close()
 
-    # Verify flattened run removes widgets
+    # Verify flattened run removes widgets on OLD NIC record too
     flat_dir = tmp_path / "out_flat"
     flat_summary = run_batch(
         RR_FORM_PATH,
         tpl_xlsx,
         flat_dir,
         source_dir=tmp_path,
-        image_dir=img_dir,
+        image_dir=img_base_dir,
         flatten=True,
     )
     assert flat_summary.succeeded == 2
@@ -171,16 +186,16 @@ def test_end_to_end_rr_form_batch_editable_and_flattened(tmp_path: Path) -> None
     try:
         assert list(doc_flat[0].widgets() or []) == []
         assert "2026/11/21" in doc_flat[0].get_text()
+        assert len(doc_flat[0].get_images()) >= orig_img_count + 3
     finally:
         doc_flat.close()
 
 
 def test_batch_per_record_error_isolation_and_concat(tmp_path: Path) -> None:
-    tpl_xlsx, _, img_dir = _build_rr_form_fixture(tmp_path)
-    # Add a 3rd record that does not exist in employees.xlsx + a !<CONCAT> row
+    tpl_xlsx, _, img_base_dir = _build_rr_form_fixture(tmp_path)
     wb = openpyxl.load_workbook(tpl_xlsx)
     wb["Data"].append([3, 9999, None, None, "MissingUser"])
-    wb["Overlay"].append([15, "!<CONCAT><CertDate>", "<Type=Text><Text= (Verified)>", None, None])
+    wb["Overlay"].append([18, "!<CONCAT><CertDate>", "<Type=Text><Text=(Verified)>", None, None])
     wb.save(tpl_xlsx)
     wb.close()
 
@@ -190,7 +205,7 @@ def test_batch_per_record_error_isolation_and_concat(tmp_path: Path) -> None:
         tpl_xlsx,
         out_dir,
         source_dir=tmp_path,
-        image_dir=img_dir,
+        image_dir=img_base_dir,
     )
     assert summary.total == 3
     assert summary.succeeded == 2
@@ -198,7 +213,6 @@ def test_batch_per_record_error_isolation_and_concat(tmp_path: Path) -> None:
     assert summary.results[2].success is False
     assert "9999" in (summary.results[2].error or "")
 
-    # Verify !<CONCAT> appended to CertDate text overlay on valid PDF
     doc = pymupdf.open(out_dir / "1001-Kamal Perera.pdf")
     try:
         assert "2026/11/21(Verified)" in doc[0].get_text()
@@ -214,8 +228,8 @@ def test_render_record_pdf_error_cases(tmp_path: Path) -> None:
         render_record_pdf(RR_FORM_PATH, tmp_path / "out.pdf", page_index=5)
 
 
-def test_cli_headless_and_session_and_errors(tmp_path: Path, capsys) -> None:
-    tpl_xlsx, _, img_dir = _build_rr_form_fixture(tmp_path)
+def test_cli_headless_and_session_and_errors(tmp_path: Path) -> None:
+    tpl_xlsx, _, img_base_dir = _build_rr_form_fixture(tmp_path)
     out_dir = tmp_path / "cli_out"
     session_file = tmp_path / "session.json"
 
@@ -223,7 +237,7 @@ def test_cli_headless_and_session_and_errors(tmp_path: Path, capsys) -> None:
         "--pdf", str(RR_FORM_PATH),
         "--template", str(tpl_xlsx),
         "--source-dir", str(tmp_path),
-        "--image-dir", str(img_dir),
+        "--image-dir", str(img_base_dir),
         "--output-dir", str(out_dir),
         "--save-session", str(session_file),
         "--flatten",
@@ -232,26 +246,21 @@ def test_cli_headless_and_session_and_errors(tmp_path: Path, capsys) -> None:
     assert (out_dir / "1001-Kamal Perera.pdf").exists()
     assert session_file.exists()
 
-    # Run again using saved --session
     out_dir2 = tmp_path / "cli_out2"
     rc2 = cli_main([
         "--session", str(session_file),
-        "--image-dir", str(img_dir),
+        "--image-dir", str(img_base_dir),
         "--output-dir", str(out_dir2),
     ])
     assert rc2 == 0
     assert (out_dir2 / "1002-Nimal Silva.pdf").exists()
 
-    # Error when session file does not exist
-    rc_err = cli_main(["--session", str(tmp_path / "nope.json")])
-    assert rc_err == 1
+    assert cli_main(["--session", str(tmp_path / "nope.json")]) == 1
 
-    # Error when GUI picker returns empty strings
     with patch("pdf_bulk_fill.cli.pick_pdf_file", return_value=""), patch(
         "pdf_bulk_fill.cli.pick_excel_file", return_value=""
     ):
-        rc_empty = cli_main(["--gui"])
-        assert rc_empty == 1
+        assert cli_main(["--gui"]) == 1
 
 
 def test_gui_dialogs_mocked() -> None:
