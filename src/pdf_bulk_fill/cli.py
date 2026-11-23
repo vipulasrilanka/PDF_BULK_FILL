@@ -103,16 +103,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             or (session.output_dir if session and session.output_dir else None)
             or "data/output"
         )
-        source_dir = (
-            args.source_dir
-            if args.source_dir is not None
-            else (session.source_dir if session else None)
-        )
-        image_dir = (
-            args.image_dir
-            if args.image_dir is not None
-            else (session.image_dir if session else None)
-        )
+        # Pass explicit CLI overrides only; run_batch() falls back to session values when None.
+        source_dir = args.source_dir
+        image_dir = args.image_dir
         page_index = (
             args.page
             if args.page is not None

@@ -47,11 +47,30 @@ def extract_number(value: Any, cast: Callable[[float], Any] = float) -> Any:
             pass
 
     # Fallback: extract single embedded numeric token (e.g., "Rs. 1,234.50", "USD .50")
-    matches = _NUMBER_PATTERN.findall(raw_text)
+    matches = list(_NUMBER_PATTERN.finditer(raw_text))
     if len(matches) != 1:
         raise PreprocessError(f"Could not extract a valid number from {value!r}.")
 
-    token = matches[0]
+    match = matches[0]
+    token = match.group(0)
+    leading = raw_text[: match.start()]
+    trailing = raw_text[match.end() :]
+
+    # Reject incomplete exponents (1e, 1e+, 1e-), trailing dots/alphanumerics (100.abc),
+    # or malformed leading characters glued to the token (++5, ..50, abc100).
+    if trailing and (trailing[0].isalnum() or trailing[0] in ".+-"):
+        raise PreprocessError(
+            f"Malformed numeric value {value!r} (unexpected trailing {trailing!r})."
+        )
+    if leading and (
+        leading[-1].isalnum()
+        or leading[-1] in "+-"
+        or (leading[-1] == "." and token.startswith("."))
+    ):
+        raise PreprocessError(
+            f"Malformed numeric value {value!r} (unexpected prefix {leading!r})."
+        )
+
     if ",," in token or token.endswith(","):
         raise PreprocessError(f"Malformed numeric grouping in {value!r}.")
 

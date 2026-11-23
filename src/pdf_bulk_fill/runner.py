@@ -12,7 +12,12 @@ from typing import Any, Callable, Mapping, Sequence
 
 import pymupdf
 
-from pdf_bulk_fill.errors import ExcelLoadError, PdfBulkFillError, PdfRenderError
+from pdf_bulk_fill.errors import (
+    ExcelLoadError,
+    PdfBulkFillError,
+    PdfRenderError,
+    PreprocessError,
+)
 from pdf_bulk_fill.excel_loader import WorkbookStore
 from pdf_bulk_fill.pdf_form import apply_form_fields_to_page, expand_comb_groups
 from pdf_bulk_fill.pdf_image_overlay import apply_image_overlays_to_page
@@ -138,7 +143,12 @@ def resolve_record_payload(
             continue
 
         raw_val = _resolve_raw_value(overlay, record, store)
-        processed_val = apply_preprocess(raw_val, overlay.preprocess)
+        try:
+            processed_val = apply_preprocess(raw_val, overlay.preprocess)
+        except PreprocessError as exc:
+            raise PreprocessError(
+                f"Record '{record.key}' mapping '{overlay.name}': {exc}"
+            ) from exc
 
         if overlay.is_concat:
             apply_concat(concat_targets, overlay.name, processed_val)
@@ -291,11 +301,27 @@ def run_batch(
     with WorkbookStore() as store:
         resolved_entries: list[SourceFileEntry] = []
         for file_name in required_files:
-            candidate = resolve_source_path(file_name, active_session, effective_source_dir)
-            if not candidate.exists() and file_locator is not None:
-                located = file_locator(file_name)
-                if located:
-                    candidate = Path(located)
+            if source_dir is not None:
+                # Explicit --source-dir / source_dir override takes precedence over saved session
+                candidate = Path(source_dir) / file_name
+                if not candidate.exists():
+                    if file_locator is not None:
+                        located = file_locator(file_name)
+                        if located:
+                            candidate = Path(located)
+                    if not candidate.exists():
+                        raise ExcelLoadError(
+                            f"Required source workbook '{file_name}' not found in "
+                            f"explicit source directory '{Path(source_dir)}'."
+                        )
+            else:
+                candidate = resolve_source_path(
+                    file_name, active_session, effective_source_dir
+                )
+                if not candidate.exists() and file_locator is not None:
+                    located = file_locator(file_name)
+                    if located:
+                        candidate = Path(located)
             store.load(
                 candidate,
                 alias=file_name,
