@@ -2,86 +2,38 @@
 
 from __future__ import annotations
 
-import math
-import re
 from datetime import datetime
+from decimal import ROUND_HALF_UP, Decimal
 from typing import Any, Callable, Sequence
 
 from num2words import num2words
 
+from pdf_bulk_fill.currency_parser import parse_currency_amount
 from pdf_bulk_fill.errors import PreprocessError
 
-# Matches signed numbers with optional comma grouping, leading decimals (.50),
-# and scientific notation (1e-05, 2.5E+3). Requires at least one digit.
-_NUMBER_PATTERN = re.compile(
-    r"[+-]?(?:\d[\d,]*(?:\.\d+)?|\.\d+)(?:[eE][+-]?\d+)?"
-)
 
-
-def extract_number(value: Any, cast: Callable[[float], Any] = float) -> Any:
-    """Extract a numeric value from an int, float, or formatted string.
+def extract_number(
+    value: Any,
+    cast: Callable[[Any], Any] = float,
+    *,
+    expected_currency: str | None = None,
+    input_locale: str | None = None,
+) -> Any:
+    """Extract and validate a finite numeric value via the CLDR/Decimal currency parser.
 
     Raises:
-        PreprocessError: If ``value`` does not contain a valid finite number.
+        PreprocessError: If ``value`` is malformed, ambiguous, or has a currency mismatch.
     """
-    if isinstance(value, bool) or value is None:
-        raise PreprocessError(f"Invalid numeric value: {value!r}")
-    if isinstance(value, (int, float)):
-        if not math.isfinite(value):
-            raise PreprocessError(f"Non-finite numeric value: {value!r}")
-        return cast(value)
-
-    raw_text = str(value).strip()
-    if not raw_text:
-        raise PreprocessError("Empty string is not a valid numeric value.")
-
-    # Fast path: clean direct numeric string (handles 1e-05, .50, -1,234.50, etc.)
-    cleaned_direct = raw_text.replace(",", "")
-    if ",," not in raw_text and not raw_text.startswith(",") and not raw_text.endswith(","):
-        try:
-            direct_val = float(cleaned_direct)
-            if not math.isfinite(direct_val):
-                raise PreprocessError(f"Non-finite numeric value: {value!r}")
-            return cast(direct_val)
-        except ValueError:
-            pass
-
-    # Fallback: extract single embedded numeric token (e.g., "Rs. 1,234.50", "USD .50")
-    matches = list(_NUMBER_PATTERN.finditer(raw_text))
-    if len(matches) != 1:
-        raise PreprocessError(f"Could not extract a valid number from {value!r}.")
-
-    match = matches[0]
-    token = match.group(0)
-    leading = raw_text[: match.start()]
-    trailing = raw_text[match.end() :]
-
-    # Reject incomplete exponents (1e, 1e+, 1e-), trailing dots/alphanumerics (100.abc),
-    # or malformed leading characters glued to the token (++5, ..50, abc100).
-    if trailing and (trailing[0].isalnum() or trailing[0] in ".+-"):
-        raise PreprocessError(
-            f"Malformed numeric value {value!r} (unexpected trailing {trailing!r})."
-        )
-    if leading and (
-        leading[-1].isalnum()
-        or leading[-1] in "+-"
-        or (leading[-1] == "." and token.startswith("."))
-    ):
-        raise PreprocessError(
-            f"Malformed numeric value {value!r} (unexpected prefix {leading!r})."
-        )
-
-    if ",," in token or token.endswith(","):
-        raise PreprocessError(f"Malformed numeric grouping in {value!r}.")
-
-    try:
-        parsed = float(token.replace(",", ""))
-    except ValueError as exc:
-        raise PreprocessError(f"Invalid numeric value {value!r}: {exc}") from exc
-
-    if not math.isfinite(parsed):
-        raise PreprocessError(f"Non-finite numeric value: {value!r}")
-    return cast(parsed)
+    parsed = parse_currency_amount(
+        value,
+        expected_currency=expected_currency,
+        input_locale=input_locale,
+    )
+    if cast is Decimal:
+        return parsed.amount
+    if cast is round:
+        return int(parsed.amount.quantize(Decimal("1"), rounding=ROUND_HALF_UP))
+    return cast(parsed.amount)
 
 
 def format_date(date_string: Any, fmt: str | None = "%Y/%m/%d") -> str:
@@ -126,26 +78,54 @@ def format_number(
     decimal_points: int = 2,
     prefix: str = "",
     suffix: str = "",
+    *,
+    expected_currency: str | None = None,
+    input_locale: str | None = None,
 ) -> str:
-    """Format a number with thousands separators, fixed decimals, prefix, and suffix."""
-    num = extract_number(value, float)
+    """Format a number as exact Decimal with thousands separators, prefix, and suffix."""
+    parsed = parse_currency_amount(
+        value,
+        expected_currency=expected_currency,
+        input_locale=input_locale,
+    )
     decimals = _parse_decimal_places(decimal_points)
-    return f"{prefix}{num:,.{decimals}f}{suffix}"
+    return f"{prefix}{parsed.amount:,.{decimals}f}{suffix}"
 
 
 def format_currency(
     value: Any,
     decimal_points: int = 2,
     currency: str = "",
+    *,
+    input_locale: str | None = None,
 ) -> str:
-    """Format a number as currency with thousands separators."""
-    num = extract_number(value, float)
+    """Validate and format a currency amount using exact Decimal precision."""
+    expected = currency.strip() if isinstance(currency, str) and currency.strip() else None
+    parsed = parse_currency_amount(
+        value,
+        expected_currency=expected,
+        input_locale=input_locale,
+    )
     decimals = _parse_decimal_places(decimal_points)
-    return f"{currency} {num:,.{decimals}f}".strip()
+    label = currency.strip() if isinstance(currency, str) else ""
+    return f"{label} {parsed.amount:,.{decimals}f}".strip()
 
 
-def apply_preprocess(text: Any, preprocess_spec: dict[str, Any] | None) -> str:
-    """Apply a legacy template preprocess specification to ``text``."""
+def _clean_opt_str(val: Any) -> str | None:
+    if val is None:
+        return None
+    s = str(val).strip()
+    return s if s else None
+
+
+def apply_preprocess(
+    text: Any,
+    preprocess_spec: dict[str, Any] | None,
+    *,
+    default_currency: str | None = None,
+    default_locale: str | None = None,
+) -> str:
+    """Apply a template preprocess specification to ``text`` with optional currency/locale defaults."""
     text_str = "" if text is None else str(text)
     if not preprocess_spec or "Function" not in preprocess_spec:
         return text_str
@@ -154,13 +134,33 @@ def apply_preprocess(text: Any, preprocess_spec: dict[str, Any] | None) -> str:
     if not isinstance(func, dict):
         return text_str
 
+    # Per-field <Locale=...> / <InputLocale=...> and <Currency=...> keys in PreProcess cell
+    spec_locale = (
+        _clean_opt_str(preprocess_spec.get("InputLocale"))
+        or _clean_opt_str(preprocess_spec.get("Locale"))
+        or default_locale
+    )
+    spec_currency = _clean_opt_str(preprocess_spec.get("Currency")) or default_currency
+
     name = func.get("name")
     if name == "NumberToText":
         mode = func.get("param2")
+        eff_locale = _clean_opt_str(func.get("param3")) or spec_locale
+        eff_currency = _clean_opt_str(func.get("param4")) or spec_currency
         if mode == "Integer":
-            number = extract_number(text_str, round)
+            number = extract_number(
+                text_str,
+                round,
+                expected_currency=eff_currency,
+                input_locale=eff_locale,
+            )
         else:
-            number = extract_number(text_str, float)
+            number = extract_number(
+                text_str,
+                float,
+                expected_currency=eff_currency,
+                input_locale=eff_locale,
+            )
         return num2words(number, to="cardinal").capitalize()
 
     if name == "AddSpace":
@@ -171,18 +171,25 @@ def apply_preprocess(text: Any, preprocess_spec: dict[str, Any] | None) -> str:
         return format_date(text, func.get("param2"))
 
     if name == "NumberToCurrency":
+        eff_currency = _clean_opt_str(func.get("param3")) or spec_currency or ""
+        eff_locale = _clean_opt_str(func.get("param4")) or spec_locale
         return format_currency(
             text_str,
             decimal_points=func.get("param2", 2),
-            currency=str(func.get("param3", "")),
+            currency=eff_currency,
+            input_locale=eff_locale,
         )
 
     if name == "FormatNumber":
+        eff_locale = _clean_opt_str(func.get("param5")) or spec_locale
+        eff_currency = _clean_opt_str(func.get("param6")) or spec_currency
         return format_number(
             text_str,
             decimal_points=func.get("param2", 2),
             prefix=str(func.get("param3", "")),
             suffix=str(func.get("param4", "")),
+            expected_currency=eff_currency,
+            input_locale=eff_locale,
         )
 
     if name == "changeTextCase":

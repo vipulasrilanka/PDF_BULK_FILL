@@ -21,7 +21,7 @@ from pdf_bulk_fill import (
 def test_extract_number() -> None:
     assert extract_number(42, int) == 42
     assert extract_number(3.14, float) == 3.14
-    assert extract_number("Rs. 12,345.67", float) == 12345.67
+    assert extract_number("Rs. 12,345.67", float, expected_currency="LKR") == 12345.67
     with pytest.raises(PreprocessError):
         extract_number("no digits", float)
 

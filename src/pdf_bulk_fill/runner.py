@@ -32,12 +32,14 @@ from pdf_bulk_fill.session import (
 from pdf_bulk_fill.template_parser import (
     DEFAULT_OVERLAY_SHEET,
     DEFAULT_RECORD_SHEET,
+    DEFAULT_SETTINGS_SHEET,
     OverlayDefinition,
     RecordEntry,
     apply_concat,
     get_required_source_files,
     load_overlay_definitions,
     load_record_list,
+    load_template_settings,
 )
 
 _UNSAFE_FILENAME_CHARS = re.compile(r'[\x00-\x1f<>:"/\\|?*]+')
@@ -116,6 +118,9 @@ def resolve_record_payload(
     record: RecordEntry,
     overlays: Sequence[OverlayDefinition],
     store: WorkbookStore,
+    *,
+    default_currency: str | None = None,
+    default_locale: str | None = None,
 ) -> tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, Any]]]:
     """Resolve all overlays for one record into (form_fields, text_overlays, image_overlays)."""
     form_fields: dict[str, Any] = {}
@@ -144,7 +149,12 @@ def resolve_record_payload(
 
         raw_val = _resolve_raw_value(overlay, record, store)
         try:
-            processed_val = apply_preprocess(raw_val, overlay.preprocess)
+            processed_val = apply_preprocess(
+                raw_val,
+                overlay.preprocess,
+                default_currency=default_currency,
+                default_locale=default_locale,
+            )
         except PreprocessError as exc:
             raise PreprocessError(
                 f"Record '{record.key}' mapping '{overlay.name}': {exc}"
@@ -254,8 +264,11 @@ def run_batch(
     skip_missing_images: bool = False,
     strict_unknown_fields: bool = True,
     allow_truncation: bool = False,
+    default_currency: str | None = None,
+    input_locale: str | None = None,
     record_sheet: str = DEFAULT_RECORD_SHEET,
     overlay_sheet: str = DEFAULT_OVERLAY_SHEET,
+    settings_sheet: str = DEFAULT_SETTINGS_SHEET,
     password_provider: Callable[[str], str | None] | None = None,
     file_locator: Callable[[str], str | Path | None] | None = None,
     save_session_path: str | Path | None = None,
@@ -278,7 +291,27 @@ def run_batch(
 
     records = load_record_list(tpl_path, sheet_name=record_sheet)
     overlays = load_overlay_definitions(tpl_path, sheet_name=overlay_sheet)
+    tpl_settings = load_template_settings(tpl_path, sheet_name=settings_sheet)
     required_files = get_required_source_files(overlays)
+
+    effective_currency = (
+        default_currency
+        if default_currency is not None
+        else (
+            session.currency
+            if session and session.currency is not None
+            else tpl_settings.currency
+        )
+    )
+    effective_locale = (
+        input_locale
+        if input_locale is not None
+        else (
+            session.input_locale
+            if session and session.input_locale is not None
+            else tpl_settings.input_locale
+        )
+    )
 
     active_session = session or SessionConfig(
         pdf_file=str(pdf_path),
@@ -348,6 +381,8 @@ def run_batch(
                 flatten=flatten,
                 skip_missing_images=skip_missing_images,
                 allow_truncation=allow_truncation,
+                currency=effective_currency,
+                input_locale=effective_locale,
             )
             save_session(save_session_path, updated_session)
 
@@ -395,7 +430,11 @@ def run_batch(
             record_warnings: list[str] = []
             try:
                 form_fields, text_overlays, image_overlays = resolve_record_payload(
-                    record, overlays, store
+                    record,
+                    overlays,
+                    store,
+                    default_currency=effective_currency,
+                    default_locale=effective_locale,
                 )
                 rendered_path = render_record_pdf(
                     pdf_path,

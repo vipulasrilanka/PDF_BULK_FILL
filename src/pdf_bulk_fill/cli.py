@@ -73,6 +73,18 @@ def build_parser() -> argparse.ArgumentParser:
         help="Truncate overlength AcroForm values with warnings instead of failing the record.",
     )
     parser.add_argument(
+        "--currency",
+        type=str,
+        default=None,
+        help="Default expected ISO 4217 currency code (e.g., LKR, USD, EUR).",
+    )
+    parser.add_argument(
+        "--input-locale",
+        type=str,
+        default=None,
+        help="Default input number locale (e.g., en_US, en_LK, de_DE, fr_FR, fr_CA).",
+    )
+    parser.add_argument(
         "--save-session",
         type=str,
         default=None,
@@ -152,6 +164,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             flatten=flatten,
             skip_missing_images=skip_missing_images,
             allow_truncation=allow_truncation,
+            default_currency=args.currency,
+            input_locale=args.input_locale,
             password_provider=prompt_password if use_gui else None,
             file_locator=(
                 (lambda fname: pick_excel_file(f"Locate {fname}", Path.cwd()))

@@ -19,6 +19,7 @@ from pdf_bulk_fill.excel_loader import normalize_key
 
 DEFAULT_OVERLAY_SHEET = "Overlay"
 DEFAULT_RECORD_SHEET = "Data"
+DEFAULT_SETTINGS_SHEET = "Settings"
 
 # Column indices in Overlay sheet
 COL_OVERLAY_INDEX = 0
@@ -37,6 +38,14 @@ SUPPORTED_CONTENT_TYPES = frozenset({"File", "Text", "FormField", "Image"})
 _KV_PATTERN = re.compile(r"<([^=<>]+)=([^<>]*)>")
 _FUNC_PATTERN = re.compile(r"^(\w+)\((.*)\)$")
 _CONCAT_PATTERN = re.compile(r"^!<CONCAT><(.+)>$")
+
+
+@dataclass(frozen=True)
+class TemplateSettings:
+    """Optional template-level defaults read from the Settings sheet of TEMPLATE.xlsx."""
+
+    currency: str | None = None
+    input_locale: str | None = None
 
 
 @dataclass(frozen=True)
@@ -233,6 +242,42 @@ def load_overlay_definitions(
                 )
             )
         return overlays
+    finally:
+        wb.close()
+
+
+def load_template_settings(
+    template_path: str | Path,
+    sheet_name: str = DEFAULT_SETTINGS_SHEET,
+) -> TemplateSettings:
+    """Load optional template-level settings (Currency, InputLocale) from TEMPLATE.xlsx.
+
+    Returns empty defaults when the optional ``Settings`` sheet is absent.
+    """
+    path = Path(template_path)
+    if not path.exists():
+        raise TemplateParseError(f"Template file not found: {path}")
+
+    wb = openpyxl.load_workbook(path, data_only=True)
+    try:
+        if sheet_name not in wb.sheetnames:
+            return TemplateSettings()
+
+        sheet = wb[sheet_name]
+        currency: str | None = None
+        input_locale: str | None = None
+        for row in sheet.iter_rows(values_only=True):
+            if not row or len(row) < 2 or row[0] is None:
+                continue
+            key = str(row[0]).strip().lower()
+            val = "" if row[1] is None else str(row[1]).strip()
+            if not val:
+                continue
+            if key in ("currency", "defaultcurrency", "default_currency"):
+                currency = val
+            elif key in ("inputlocale", "input_locale", "locale"):
+                input_locale = val
+        return TemplateSettings(currency=currency, input_locale=input_locale)
     finally:
         wb.close()
 

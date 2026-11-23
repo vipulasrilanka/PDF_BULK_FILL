@@ -22,8 +22,8 @@ Build a clean, extensible Python application to bulk-fill PDF documents from Exc
   - `changeTextCase` (`UPPER`, `lower`, `Title`)
   - `FormatDate`
   - `NumberToText` (`Integer`, `Floating Point`)
-  - `NumberToCurrency`
-  - `FormatNumber`
+  - `NumberToCurrency` (with Unicode CLDR/Babel currency code & symbol recognition on either side, `Decimal` precision, locale-aware decimal/grouping separators, currency mismatch & ambiguity rejection, optional template-level `Settings` sheet defaults and per-field overrides)
+  - `FormatNumber` (same `Decimal` & locale-aware numeric validation)
   - `AddSpace`
 - Support fixed-box comb line splitting (e.g., splitting **Full Name** across `22 / 31 / 31` boxes and **Name with Initials** across `20 / 31` boxes without breaking words awkwardly).
 

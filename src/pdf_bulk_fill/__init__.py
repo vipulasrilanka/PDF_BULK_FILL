@@ -1,5 +1,12 @@
 """PDF_BULK_FILL package."""
 
+from pdf_bulk_fill.currency_parser import (
+    ISO_CURRENCIES,
+    LocaleSpec,
+    ParsedAmount,
+    parse_currency_amount,
+    resolve_locale_spec,
+)
 from pdf_bulk_fill.errors import (
     EncryptedFileError,
     ExcelLoadError,
@@ -64,12 +71,15 @@ from pdf_bulk_fill.session import (
 from pdf_bulk_fill.template_parser import (
     DEFAULT_OVERLAY_SHEET,
     DEFAULT_RECORD_SHEET,
+    DEFAULT_SETTINGS_SHEET,
     OverlayDefinition,
     RecordEntry,
+    TemplateSettings,
     apply_concat,
     get_required_source_files,
     load_overlay_definitions,
     load_record_list,
+    load_template_settings,
     parse_kv_pairs,
 )
 
@@ -95,13 +105,21 @@ __all__ = [
     "normalize_key",
     "DEFAULT_OVERLAY_SHEET",
     "DEFAULT_RECORD_SHEET",
+    "DEFAULT_SETTINGS_SHEET",
+    "TemplateSettings",
     "RecordEntry",
     "OverlayDefinition",
     "load_record_list",
     "load_overlay_definitions",
+    "load_template_settings",
     "get_required_source_files",
     "apply_concat",
     "parse_kv_pairs",
+    "ISO_CURRENCIES",
+    "LocaleSpec",
+    "ParsedAmount",
+    "resolve_locale_spec",
+    "parse_currency_amount",
     "apply_preprocess",
     "extract_number",
     "format_date",

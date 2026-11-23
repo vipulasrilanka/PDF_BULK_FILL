@@ -45,6 +45,8 @@ class SessionConfig:
     flatten: bool = False
     skip_missing_images: bool = False
     allow_truncation: bool = False
+    currency: str | None = None
+    input_locale: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize to a legacy-compatible JSON dictionary."""
@@ -67,6 +69,10 @@ class SessionConfig:
             data["skipMissingImages"] = self.skip_missing_images
         if self.allow_truncation:
             data["allowTruncation"] = self.allow_truncation
+        if self.currency is not None:
+            data["currency"] = self.currency
+        if self.input_locale is not None:
+            data["inputLocale"] = self.input_locale
         return data
 
 
@@ -161,6 +167,8 @@ def load_session(session_path: str | Path) -> SessionConfig:
     allow_truncation = _extract_optional_bool(
         raw, "allowTruncation", "allow_truncation", default=False
     )
+    currency = _extract_optional_str(raw, "currency", "defaultCurrency", "default_currency")
+    input_locale = _extract_optional_str(raw, "inputLocale", "input_locale", "locale")
 
     return SessionConfig(
         pdf_file=pdf_file,
@@ -173,6 +181,8 @@ def load_session(session_path: str | Path) -> SessionConfig:
         flatten=flatten,
         skip_missing_images=skip_missing_images,
         allow_truncation=allow_truncation,
+        currency=currency,
+        input_locale=input_locale,
     )
 
 
