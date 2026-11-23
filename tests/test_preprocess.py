@@ -96,6 +96,7 @@ def test_apply_preprocess_all_legacy_functions() -> None:
         apply_preprocess(
             "5000",
             {"Function": {"name": "NumberToCurrency", "param2": 2, "param3": "Rs."}},
+            default_locale="en_LK",
         )
         == "Rs. 5,000.00"
     )

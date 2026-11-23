@@ -35,6 +35,25 @@ COL_RECORD_IDENTIFIER = 4
 
 SUPPORTED_CONTENT_TYPES = frozenset({"File", "Text", "FormField", "Image"})
 
+# Keys whose values must remain literal strings (preserving precision, leading zeros, etc.)
+_LITERAL_STRING_KEYS = frozenset(
+    {
+        "Text",
+        "FileName",
+        "DocType",
+        "Field",
+        "PrimaryKey",
+        "PrimeryKey",
+        "Sheet",
+        "File",
+        "Value",
+        "Location",
+        "Currency",
+        "Locale",
+        "InputLocale",
+    }
+)
+
 _KV_PATTERN = re.compile(r"<([^=<>]+)=([^<>]*)>")
 _FUNC_PATTERN = re.compile(r"^(\w+)\((.*)\)$")
 _CONCAT_PATTERN = re.compile(r"^!<CONCAT><(.+)>$")
@@ -122,8 +141,11 @@ def parse_kv_pairs(raw: Any) -> dict[str, Any] | None:
     parsed: dict[str, Any] = {}
     for key, raw_val in matches:
         clean_key = key.strip()
-        scalar = extract_scalar_value(raw_val)
-        parsed[clean_key] = parse_function_call(scalar)
+        if clean_key in _LITERAL_STRING_KEYS:
+            parsed[clean_key] = raw_val.strip()
+        else:
+            scalar = extract_scalar_value(raw_val)
+            parsed[clean_key] = parse_function_call(scalar)
     return parsed
 
 

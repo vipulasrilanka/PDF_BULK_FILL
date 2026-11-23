@@ -814,7 +814,7 @@ class TestAdditionalEdgeCombinations:
 
     def test_issue12_and_14_currency_text_and_invalid_decimals(self) -> None:
         assert format_currency("1e-05", 5, "LKR") == "LKR 0.00001"
-        assert format_currency(".50", 2, "Rs.") == "Rs. 0.50"
+        assert format_currency(".50", 2, "Rs.", input_locale="en_LK") == "Rs. 0.50"
         assert (
             apply_preprocess(
                 "2.5e3",

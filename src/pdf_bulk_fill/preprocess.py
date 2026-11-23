@@ -149,14 +149,14 @@ def apply_preprocess(
         eff_currency = _clean_opt_str(func.get("param4")) or spec_currency
         if mode == "Integer":
             number = extract_number(
-                text_str,
+                text,
                 round,
                 expected_currency=eff_currency,
                 input_locale=eff_locale,
             )
         else:
             number = extract_number(
-                text_str,
+                text,
                 float,
                 expected_currency=eff_currency,
                 input_locale=eff_locale,
@@ -174,7 +174,7 @@ def apply_preprocess(
         eff_currency = _clean_opt_str(func.get("param3")) or spec_currency or ""
         eff_locale = _clean_opt_str(func.get("param4")) or spec_locale
         return format_currency(
-            text_str,
+            text,
             decimal_points=func.get("param2", 2),
             currency=eff_currency,
             input_locale=eff_locale,
@@ -184,7 +184,7 @@ def apply_preprocess(
         eff_locale = _clean_opt_str(func.get("param5")) or spec_locale
         eff_currency = _clean_opt_str(func.get("param6")) or spec_currency
         return format_number(
-            text_str,
+            text,
             decimal_points=func.get("param2", 2),
             prefix=str(func.get("param3", "")),
             suffix=str(func.get("param4", "")),

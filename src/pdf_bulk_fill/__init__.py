@@ -6,6 +6,7 @@ from pdf_bulk_fill.currency_parser import (
     ParsedAmount,
     parse_currency_amount,
     resolve_locale_spec,
+    validate_configured_currency,
 )
 from pdf_bulk_fill.errors import (
     EncryptedFileError,
@@ -119,6 +120,7 @@ __all__ = [
     "LocaleSpec",
     "ParsedAmount",
     "resolve_locale_spec",
+    "validate_configured_currency",
     "parse_currency_amount",
     "apply_preprocess",
     "extract_number",

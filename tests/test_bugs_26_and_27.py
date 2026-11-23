@@ -404,7 +404,8 @@ class TestIssue27BabelCurrencyAndLocale:
             ("100EUR", "USD", "en_US", "mismatch"),
             ("£100", "USD", "en_US", "mismatch"),
             ("USD 100 EUR", "USD", "en_US", "currency|mismatch|multiple"),
-            ("USD100", "Rs.", None, "mismatch"),
+            ("USD100", "Rs.", "en_LK", "mismatch"),
+            ("USD100", "Rs.", None, "ambiguous"),
             # Ambiguous currency symbol with no currency or locale configured
             ("$100", None, None, "ambiguous"),
             ("100 $", None, None, "ambiguous"),
@@ -581,9 +582,10 @@ class TestIssue27BabelCurrencyAndLocale:
         assert parse_currency_amount("€50").currency == "EUR"
         assert parse_currency_amount("US$75").currency == "USD"
 
-        # Legacy symbol expected_currency ('Rs.')
+        # Legacy symbol expected_currency ('Rs.') requires a resolving locale
         assert parse_currency_amount("Rs. 100", expected_currency="Rs.", input_locale="en_LK").currency == "LKR"
-        assert parse_currency_amount("Rs. 100", expected_currency="Rs.").amount == Decimal("100")
+        with pytest.raises(PreprocessError, match="(?i)ambiguous"):
+            parse_currency_amount("Rs. 100", expected_currency="Rs.")
 
         # Direct Decimal input and non-finite rejection
         assert extract_number(Decimal("12.34"), Decimal) == Decimal("12.34")
@@ -623,3 +625,250 @@ class TestIssue27BabelCurrencyAndLocale:
             assert "CAD 100.50" in doc[0].get_text()
         finally:
             doc.close()
+
+
+class TestIssue27FollowUpFiveGaps:
+    """TDD regression tests for the 5 verification gaps reported on commit 9e3c051."""
+
+    def test_gap1_numeric_vs_text_excel_cells_under_de_DE_reopened_pdf(
+        self, tmp_path: Path
+    ) -> None:
+        tpl_pdf = _make_blank_pdf(tmp_path / "blank.pdf")
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.title = "Pay"
+        ws.append(["ID", "Amount"])
+        ws.append([1, 1.234])       # Numeric Excel cell -> EUR 1.23
+        ws.append([2, 1234.56])     # Numeric Excel cell -> EUR 1,234.56
+        ws.append([3, "1.234"])     # Text Excel cell under de_DE -> EUR 1,234.00
+        ws["B4"].number_format = "@"  # Explicitly text
+        wb.save(tmp_path / "pay.xlsx")
+        wb.close()
+
+        tpl_xlsx = _write_workbook(
+            tmp_path / "TEMPLATE.xlsx",
+            {
+                "Settings": [
+                    ["Key", "Value"],
+                    ["Currency", "EUR"],
+                    ["InputLocale", "de_DE"],
+                ],
+                "Data": [
+                    ["Index", "Key", "C", "D", "Name"],
+                    [1, 1, None, None, "NumSmall"],
+                    [2, 2, None, None, "NumLarge"],
+                    [3, 3, None, None, "TextGrouped"],
+                ],
+                "Overlay": [
+                    ["Index", "Name", "Content", "Param", "PreProcess"],
+                    [
+                        1,
+                        "EuroAmount",
+                        "<Type=File><File=pay.xlsx><Sheet=Pay><PrimaryKey=A><Value=B>",
+                        "<X=50><Y=700><Font=Helvetica><FontSize=12>",
+                        "<Function=NumberToCurrency(text, 2, EUR)>",
+                    ],
+                ],
+            },
+        )
+
+        out_dir = tmp_path / "out"
+        rc = cli_main([
+            "--pdf", str(tpl_pdf),
+            "--template", str(tpl_xlsx),
+            "--source-dir", str(tmp_path),
+            "--output-dir", str(out_dir),
+        ])
+        assert rc == 0
+
+        for fname, expected in [
+            ("1-NumSmall.pdf", "EUR 1.23"),
+            ("2-NumLarge.pdf", "EUR 1,234.56"),
+            ("3-TextGrouped.pdf", "EUR 1,234.00"),
+        ]:
+            doc = pymupdf.open(out_dir / fname)
+            try:
+                text = doc[0].get_text()
+                assert expected in text, f"{fname}: expected {expected!r} in {text!r}"
+                if fname == "1-NumSmall.pdf":
+                    assert "EUR 1,234.00" not in text
+            finally:
+                doc.close()
+
+    def test_gap2_large_template_literal_and_source_cell_preserve_decimal_precision(
+        self, tmp_path: Path
+    ) -> None:
+        tpl_pdf = _make_blank_pdf(tmp_path / "blank.pdf")
+        _write_workbook(
+            tmp_path / "big.xlsx",
+            {"Pay": [["ID", "Amt"], [1, "9007199254740993.01"]]},
+        )
+        tpl_xlsx = _write_workbook(
+            tmp_path / "TEMPLATE.xlsx",
+            {
+                "Settings": [
+                    ["Key", "Value"],
+                    ["Currency", "USD"],
+                    ["InputLocale", "en_US"],
+                ],
+                "Data": [["Index", "Key", "C", "D", "Name"], [1, 1, None, None, "BigNum"]],
+                "Overlay": [
+                    ["Index", "Name", "Content", "Param", "PreProcess"],
+                    [
+                        1,
+                        "LiteralAmt",
+                        "<Type=Text><Text=9007199254740993.01>",
+                        "<X=50><Y=720><Font=Helvetica><FontSize=12>",
+                        "<Function=NumberToCurrency(text, 2, USD)>",
+                    ],
+                    [
+                        2,
+                        "SourceAmt",
+                        "<Type=File><File=big.xlsx><Sheet=Pay><PrimaryKey=A><Value=B>",
+                        "<X=50><Y=680><Font=Helvetica><FontSize=12>",
+                        "<Function=NumberToCurrency(text, 2, USD)>",
+                    ],
+                ],
+            },
+        )
+        out_dir = tmp_path / "out"
+        rc = cli_main([
+            "--pdf", str(tpl_pdf),
+            "--template", str(tpl_xlsx),
+            "--source-dir", str(tmp_path),
+            "--output-dir", str(out_dir),
+        ])
+        assert rc == 0
+
+        doc = pymupdf.open(out_dir / "1-BigNum.pdf")
+        try:
+            text = doc[0].get_text()
+            assert text.count("USD 9,007,199,254,740,993.01") == 2
+            assert "9,007,199,254,740,994.00" not in text
+        finally:
+            doc.close()
+
+    def test_gap3_unknown_or_ambiguous_configured_currency_rejected_before_writing(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        from pdf_bulk_fill import parse_currency_amount
+
+        # Direct parser checks
+        with pytest.raises(PreprocessError, match="(?i)unknown.*currency"):
+            parse_currency_amount("USD100", expected_currency="USX")
+        with pytest.raises(PreprocessError, match="(?i)ambiguous"):
+            parse_currency_amount("$100", expected_currency="$")
+        with pytest.raises(PreprocessError, match="(?i)ambiguous"):
+            parse_currency_amount("100", expected_currency="$")
+
+        # Batch with Currency=USX in Settings must fail BEFORE writing any PDF
+        tpl_pdf = _make_blank_pdf(tmp_path / "blank.pdf")
+        _write_workbook(tmp_path / "pay.xlsx", {"Pay": [["ID", "Amt"], [1, "USD100"]]})
+        tpl_usx = _write_workbook(
+            tmp_path / "TEMPLATE_USX.xlsx",
+            {
+                "Settings": [["Key", "Value"], ["Currency", "USX"]],
+                "Data": [["Index", "Key", "C", "D", "Name"], [1, 1, None, None, "Rec1"]],
+                "Overlay": [
+                    ["Index", "Name", "Content", "Param", "PreProcess"],
+                    [
+                        1,
+                        "PayAmt",
+                        "<Type=File><File=pay.xlsx><Sheet=Pay><PrimaryKey=A><Value=B>",
+                        "<X=50><Y=700><Font=Helvetica><FontSize=12>",
+                        "<Function=NumberToCurrency(text, 2)>",
+                    ],
+                ],
+            },
+        )
+        out_usx = tmp_path / "out_usx"
+        rc_usx = cli_main([
+            "--pdf", str(tpl_pdf),
+            "--template", str(tpl_usx),
+            "--source-dir", str(tmp_path),
+            "--output-dir", str(out_usx),
+        ])
+        err_usx = capsys.readouterr().err
+        assert rc_usx == 1
+        assert "USX" in err_usx
+        assert not (out_usx / "1-Rec1.pdf").exists()
+
+        # Batch with Currency=$ and no resolving locale must reject and name the mapping
+        _write_workbook(tmp_path / "pay_dollar.xlsx", {"Pay": [["ID", "Amt"], [1, "$100"]]})
+        tpl_dollar = _write_workbook(
+            tmp_path / "TEMPLATE_DOLLAR.xlsx",
+            {
+                "Data": [["Index", "Key", "C", "D", "Name"], [1, 1, None, None, "Rec1"]],
+                "Overlay": [
+                    ["Index", "Name", "Content", "Param", "PreProcess"],
+                    [
+                        1,
+                        "DollarMapping",
+                        "<Type=File><File=pay_dollar.xlsx><Sheet=Pay><PrimaryKey=A><Value=B>",
+                        "<X=50><Y=700><Font=Helvetica><FontSize=12>",
+                        "<Function=NumberToCurrency(text, 2, $)>",
+                    ],
+                ],
+            },
+        )
+        out_dollar = tmp_path / "out_dollar"
+        rc_dollar = cli_main([
+            "--pdf", str(tpl_pdf),
+            "--template", str(tpl_dollar),
+            "--source-dir", str(tmp_path),
+            "--output-dir", str(out_dollar),
+        ])
+        err_dollar = capsys.readouterr().err
+        assert rc_dollar == 1
+        assert "DollarMapping" in err_dollar
+        assert "ambiguous" in err_dollar.lower()
+        assert not (out_dollar / "1-Rec1.pdf").exists()
+
+    @pytest.mark.parametrize(
+        "currency,locale_id,amount_str",
+        [
+            ("BRL", "pt_BR", "1234.56"),
+            ("BRL", "pt_BR", "-1234.56"),
+            ("SEK", "sv_SE", "1234.56"),
+            ("SEK", "sv_SE", "-1234.56"),
+            ("PLN", "pl_PL", "1234.56"),
+            ("PLN", "pl_PL", "-1234.56"),
+            ("KRW", "ko_KR", "1235"),
+            ("KRW", "ko_KR", "-1235"),
+        ],
+    )
+    def test_gap4_babel_formatted_currency_roundtrip(
+        self, currency: str, locale_id: str, amount_str: str
+    ) -> None:
+        from decimal import Decimal
+        from babel.numbers import format_currency as babel_format_currency
+        from pdf_bulk_fill import parse_currency_amount
+
+        expected_amount = Decimal(amount_str)
+        formatted = babel_format_currency(expected_amount, currency, locale=locale_id)
+        parsed = parse_currency_amount(
+            formatted,
+            expected_currency=currency,
+            input_locale=locale_id,
+        )
+        assert parsed.amount == expected_amount
+        assert parsed.currency == currency
+
+    def test_gap5_locale_specific_grouping_en_IN_vs_en_US(self) -> None:
+        from decimal import Decimal
+        from pdf_bulk_fill import parse_currency_amount
+
+        # Accepted under en_IN (CLDR grouping (3, 2))
+        parsed_in = parse_currency_amount(
+            "1,00,000.50", expected_currency="INR", input_locale="en_IN"
+        )
+        assert parsed_in.amount == Decimal("100000.50")
+        assert parsed_in.currency == "INR"
+
+        # Rejected under en_US (CLDR grouping (3, 3)) and default locale
+        with pytest.raises(PreprocessError, match="(?i)grouping|malformed"):
+            parse_currency_amount(
+                "1,00,000.50", expected_currency="USD", input_locale="en_US"
+            )
+        with pytest.raises(PreprocessError, match="(?i)grouping|malformed"):
+            parse_currency_amount("1,00,000.50")

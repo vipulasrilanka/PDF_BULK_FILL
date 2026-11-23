@@ -11,6 +11,7 @@ from typing import Any
 from babel import Locale, UnknownLocaleError
 from babel.core import parse_locale
 from babel.numbers import (
+    get_currency_symbol,
     get_decimal_symbol,
     get_group_symbol,
     get_territory_currencies,
@@ -24,13 +25,15 @@ _CURRENCY_SPACE_CHARS = " \t\u00a0\u202f\u2007\u2009"
 # Valid ISO 4217 currency codes from Unicode CLDR via Babel
 ISO_CURRENCIES: frozenset[str] = frozenset(Locale("en").currencies.keys())
 
-# Recognized currency symbols & aliases -> set of candidate ISO 4217 codes.
-# Single-element sets are unambiguous; multi-element sets require expected_currency or locale.
-_SYMBOL_CANDIDATES: dict[str, frozenset[str]] = {
+# Base currency aliases / symbols (merged dynamically with Babel CLDR locale symbols).
+_BASE_SYMBOL_CANDIDATES: dict[str, frozenset[str]] = {
     # Unambiguous symbols & prefixed symbols
     "€": frozenset({"EUR"}),
     "£": frozenset({"GBP"}),
     "₹": frozenset({"INR"}),
+    "₩": frozenset({"KRW"}),
+    "zł": frozenset({"PLN"}),
+    "R$": frozenset({"BRL"}),
     "රු.": frozenset({"LKR"}),
     "රු": frozenset({"LKR"}),
     "US$": frozenset({"USD"}),
@@ -50,12 +53,21 @@ _SYMBOL_CANDIDATES: dict[str, frozenset[str]] = {
     "RS.": frozenset({"LKR", "INR", "PKR", "NPR", "MUR", "SCR"}),
     "RS": frozenset({"LKR", "INR", "PKR", "NPR", "MUR", "SCR"}),
     "¥": frozenset({"JPY", "CNY"}),
+    "kr": frozenset({"SEK", "NOK", "DKK", "ISK"}),
 }
 
-# Pre-sorted longest-first for greedy boundary matching
-_SORTED_SYMBOLS: tuple[str, ...] = tuple(
-    sorted(_SYMBOL_CANDIDATES.keys(), key=len, reverse=True)
-)
+
+@lru_cache(maxsize=1)
+def _build_global_cldr_symbol_map() -> dict[str, frozenset[str]]:
+    """Build a symbol -> ISO candidate set map combining CLDR data with common aliases."""
+    merged: dict[str, set[str]] = {
+        sym: set(codes) for sym, codes in _BASE_SYMBOL_CANDIDATES.items()
+    }
+    en_locale = Locale("en")
+    for code, sym in en_locale.currency_symbols.items():
+        if sym and code in ISO_CURRENCIES and sym != code:
+            merged.setdefault(sym, set()).add(code)
+    return {sym: frozenset(codes) for sym, codes in merged.items()}
 
 
 @dataclass(frozen=True)
@@ -65,7 +77,9 @@ class LocaleSpec:
     locale_id: str | None
     decimal_symbol: str
     group_symbol: str
+    grouping: tuple[int, int] = (3, 3)
     territory_currencies: tuple[str, ...] = ()
+    babel_locale_name: str | None = None
 
 
 @dataclass(frozen=True)
@@ -78,7 +92,7 @@ class ParsedAmount:
 
 @lru_cache(maxsize=64)
 def resolve_locale_spec(locale_id: str | None) -> LocaleSpec:
-    """Resolve CLDR decimal/group separators and territory currencies via Babel.
+    """Resolve CLDR decimal/group separators, grouping sizes, and territory currencies via Babel.
 
     Supports language-territory IDs not directly bundled as standalone CLDR
     locales (e.g. ``en_LK`` -> language ``en`` number format + territory ``LK``
@@ -89,7 +103,9 @@ def resolve_locale_spec(locale_id: str | None) -> LocaleSpec:
             locale_id=None,
             decimal_symbol=".",
             group_symbol=",",
+            grouping=(3, 3),
             territory_currencies=(),
+            babel_locale_name=None,
         )
 
     cleaned = str(locale_id).strip().replace("-", "_")
@@ -123,43 +139,120 @@ def resolve_locale_spec(locale_id: str | None) -> LocaleSpec:
         tuple(get_territory_currencies(eff_territory)) if eff_territory else ()
     )
 
+    fmt = loc.decimal_formats.get(None)
+    raw_grouping = getattr(fmt, "grouping", (3, 3)) if fmt is not None else (3, 3)
+    grouping = (int(raw_grouping[0]), int(raw_grouping[1]))
+
     return LocaleSpec(
         locale_id=cleaned,
         decimal_symbol=get_decimal_symbol(loc),
         group_symbol=get_group_symbol(loc),
+        grouping=grouping,
         territory_currencies=terr_currencies,
+        babel_locale_name=str(loc),
     )
 
 
-def _match_leading_marker(text: str) -> tuple[str, frozenset[str], str] | None:
+def _effective_symbol_map(
+    locale_spec: LocaleSpec,
+    expected_iso: str | None = None,
+) -> dict[str, frozenset[str]]:
+    """Build symbol lookup table including locale-specific CLDR symbols from Babel."""
+    merged: dict[str, set[str]] = {
+        sym: set(codes) for sym, codes in _build_global_cldr_symbol_map().items()
+    }
+    if locale_spec.babel_locale_name:
+        loc = Locale.parse(locale_spec.babel_locale_name)
+        for code, sym in loc.currency_symbols.items():
+            if sym and code in ISO_CURRENCIES and sym != code:
+                merged.setdefault(sym, set()).add(code)
+        for code in (*locale_spec.territory_currencies, *([expected_iso] if expected_iso else [])):
+            if code and code in ISO_CURRENCIES:
+                sym = get_currency_symbol(code, locale=loc)
+                if sym and sym != code:
+                    merged.setdefault(sym, set()).add(code)
+    elif expected_iso and expected_iso in ISO_CURRENCIES:
+        sym = get_currency_symbol(expected_iso, locale="en")
+        if sym and sym != expected_iso:
+            merged.setdefault(sym, set()).add(expected_iso)
+
+    return {sym: frozenset(codes) for sym, codes in merged.items()}
+
+
+def validate_configured_currency(
+    expected_currency: str | None,
+    *,
+    input_locale: str | None = None,
+) -> str | None:
+    """Validate and resolve a configured currency (ISO 4217 code or resolvable symbol).
+
+    Raises:
+        PreprocessError: If ``expected_currency`` is unknown (e.g., ``USX``) or an
+            ambiguous symbol (e.g., ``$``, ``Rs.``) with no locale that resolves it.
+    """
+    locale_spec = resolve_locale_spec(input_locale)
+    if expected_currency is None:
+        return None
+    cleaned = str(expected_currency).strip()
+    if not cleaned:
+        return None
+
+    upper = cleaned.upper()
+    if upper in ISO_CURRENCIES:
+        return upper
+
+    symbol_map = _effective_symbol_map(locale_spec)
+    if cleaned in symbol_map:
+        cands = symbol_map[cleaned]
+        if len(cands) == 1:
+            return next(iter(cands))
+        locale_matches = [c for c in locale_spec.territory_currencies if c in cands]
+        if len(locale_matches) == 1:
+            return locale_matches[0]
+        raise PreprocessError(
+            f"Ambiguous configured currency symbol {cleaned!r}: specify an ISO 4217 "
+            "currency code (e.g. USD, CAD, LKR) or an input locale that resolves it."
+        )
+
+    raise PreprocessError(
+        f"Unknown configured currency {cleaned!r}: expected a valid ISO 4217 "
+        "currency code or recognized currency symbol."
+    )
+
+
+def _match_leading_marker(
+    text: str,
+    symbol_map: dict[str, frozenset[str]],
+) -> tuple[str, frozenset[str], str] | None:
     """Try matching a recognized currency symbol or uppercase ISO 4217 code at the start."""
-    for sym in _SORTED_SYMBOLS:
+    for sym in sorted(symbol_map.keys(), key=len, reverse=True):
         if text.startswith(sym):
             rest = text[len(sym) :]
-            # For alphabetic symbols (Rs, SLR), require non-letter boundary after symbol
             if sym[-1].isalpha() and rest and rest[0].isalpha():
                 continue
-            return sym, _SYMBOL_CANDIDATES[sym], rest
+            return sym, symbol_map[sym], rest
 
     if len(text) >= 3 and text[:3].isupper() and text[:3].isascii() and text[:3].isalpha():
         code = text[:3]
         if code in ISO_CURRENCIES:
             rest = text[3:]
-            # Avoid matching 4+ letter uppercase words unless followed by space/digit/sign/decimal
             if rest and rest[0].isalpha():
                 return None
             return code, frozenset({code}), rest
     return None
 
 
-def _match_trailing_marker(text: str) -> tuple[str, frozenset[str], str] | None:
+def _match_trailing_marker(
+    text: str,
+    symbol_map: dict[str, frozenset[str]],
+) -> tuple[str, frozenset[str], str] | None:
     """Try matching a recognized currency symbol or uppercase ISO 4217 code at the end."""
-    for sym in _SORTED_SYMBOLS:
+    for sym in sorted(symbol_map.keys(), key=len, reverse=True):
         if text.endswith(sym):
             head = text[: len(text) - len(sym)]
             if sym[0].isalpha() and head and head[-1].isalpha():
                 continue
-            return sym, _SYMBOL_CANDIDATES[sym], head
+            return sym, symbol_map[sym], head
 
     if len(text) >= 3 and text[-3:].isupper() and text[-3:].isascii() and text[-3:].isalpha():
         code = text[-3:]
@@ -171,75 +264,33 @@ def _match_trailing_marker(text: str) -> tuple[str, frozenset[str], str] | None:
     return None
 
 
-def _resolve_expected_currency(
-    expected_currency: str | None,
-) -> tuple[str | None, frozenset[str] | None]:
-    """Return (canonical_iso_code, allowed_candidates) for the template's expected currency."""
-    if expected_currency is None:
-        return None, None
-    cleaned = str(expected_currency).strip()
-    if not cleaned:
-        return None, None
-
-    upper = cleaned.upper()
-    if upper in ISO_CURRENCIES:
-        return upper, frozenset({upper})
-    if cleaned in _SYMBOL_CANDIDATES:
-        cands = _SYMBOL_CANDIDATES[cleaned]
-        canonical = next(iter(cands)) if len(cands) == 1 else None
-        return canonical, cands
-    # Custom/unrecognized label (treat literally if no conflict)
-    return None, None
-
-
 def _resolve_currency(
     marker: str | None,
     candidates: frozenset[str] | None,
     *,
-    expected_currency: str | None,
+    expected_iso: str | None,
     locale_spec: LocaleSpec,
     raw_value: Any,
 ) -> str | None:
-    """Validate and resolve the input currency marker against expected currency and locale."""
-    exp_iso, exp_candidates = _resolve_expected_currency(expected_currency)
-
+    """Validate and resolve the input currency marker against expected ISO currency and locale."""
     if marker is None or candidates is None:
-        if exp_iso is not None:
-            return exp_iso
-        return None
+        return expected_iso
 
     # 1. If template configured an expected ISO currency, input marker MUST match it.
-    if exp_iso is not None:
-        if exp_iso in candidates:
-            return exp_iso
+    if expected_iso is not None:
+        if expected_iso in candidates:
+            return expected_iso
         found_label = next(iter(candidates)) if len(candidates) == 1 else marker
         raise PreprocessError(
             f"Currency mismatch in {raw_value!r}: input specifies '{found_label}', "
-            f"but template expects '{exp_iso}'."
+            f"but template expects '{expected_iso}'."
         )
 
-    # 2. If template configured a symbol alias (e.g. legacy 'Rs.'), check overlap.
-    if exp_candidates is not None:
-        overlap = candidates & exp_candidates
-        if not overlap:
-            found_label = next(iter(candidates)) if len(candidates) == 1 else marker
-            raise PreprocessError(
-                f"Currency mismatch in {raw_value!r}: input specifies '{found_label}', "
-                f"but template expects '{expected_currency}'."
-            )
-        if len(overlap) == 1:
-            return next(iter(overlap))
-        # Narrow with locale if available; otherwise accept legacy template symbol
-        for terr_curr in locale_spec.territory_currencies:
-            if terr_curr in overlap:
-                return terr_curr
-        return None
-
-    # 3. No expected currency: unambiguous marker resolves directly.
+    # 2. No expected currency: unambiguous marker resolves directly.
     if len(candidates) == 1:
         return next(iter(candidates))
 
-    # 4. Ambiguous marker (e.g. '$' or 'Rs.'): resolve via input locale territory if unique.
+    # 3. Ambiguous marker (e.g. '$' or 'Rs.'): resolve via input locale territory if unique.
     locale_matches = [c for c in locale_spec.territory_currencies if c in candidates]
     if len(locale_matches) == 1:
         return locale_matches[0]
@@ -250,40 +301,45 @@ def _resolve_currency(
     )
 
 
-def _validate_integer_grouping(int_part: str, group_sep: str, raw_value: Any) -> str:
-    """Validate integer digits with optional locale grouping separators and return plain digits."""
+def _validate_integer_grouping(
+    int_part: str,
+    group_sep: str,
+    grouping: tuple[int, int],
+    raw_value: Any,
+) -> str:
+    """Validate integer digits strictly against the locale's CLDR grouping pattern."""
     if not int_part:
         return ""
 
     if int_part.isascii() and int_part.isdigit():
         return int_part
 
-    # For whitespace-grouped locales (e.g. fr_FR U+202F, fr_CA U+00A0), accept the
-    # locale's grouping space as well as standard NBSP/NNBSP/space, while strictly
-    # enforcing 3-digit grouping so "10 20" is always rejected.
+    primary, secondary = grouping
+
     if group_sep.isspace():
         normalized = (
             int_part.replace("\u202f", " ")
             .replace("\u00a0", " ")
             .replace("\u2009", " ")
         )
-        pattern = re.compile(r"^\d{1,3}(?: \d{3})+$")
-        if not pattern.match(normalized):
-            raise PreprocessError(f"Malformed number grouping in {raw_value!r}.")
-        return normalized.replace(" ", "")
+        esc_grp = " "
+        target = normalized
+    else:
+        esc_grp = re.escape(group_sep)
+        target = int_part
 
-    esc_grp = re.escape(group_sep)
-    standard_grp = re.compile(rf"^\d{{1,3}}(?:{esc_grp}\d{{3}})+$")
-    if standard_grp.match(int_part):
-        return int_part.replace(group_sep, "")
+    if primary == secondary:
+        pattern = re.compile(rf"^\d{{1,{primary}}}(?:{esc_grp}\d{{{primary}}})+$")
+    else:
+        # e.g. en_IN (3, 2): 1,234 | 12,345 | 1,00,000 | 12,34,567
+        pattern = re.compile(
+            rf"^\d{{1,{secondary}}}(?:{esc_grp}\d{{{secondary}}})*{esc_grp}\d{{{primary}}}$"
+        )
 
-    # Also support South Asian lakh/crore grouping (e.g. 1,00,000) when group_sep is ','
-    if group_sep == ",":
-        south_asian_grp = re.compile(r"^\d{1,2}(?:,\d{2})*,\d{3}$")
-        if south_asian_grp.match(int_part):
-            return int_part.replace(",", "")
+    if not pattern.match(target):
+        raise PreprocessError(f"Malformed number grouping in {raw_value!r}.")
 
-    raise PreprocessError(f"Malformed number grouping in {raw_value!r}.")
+    return target.replace(" " if group_sep.isspace() else group_sep, "")
 
 
 def _parse_localized_decimal(
@@ -294,7 +350,7 @@ def _parse_localized_decimal(
     raw_value: Any,
 ) -> Decimal:
     """Validate the entire numeric body strictly under ``locale_spec`` and return ``Decimal``."""
-    s = body.strip(_CURRENCY_SPACE_CHARS)
+    s = body.strip(_CURRENCY_SPACE_CHARS).replace("\u2212", "-")
     if not s:
         raise PreprocessError(f"Missing numeric amount in {raw_value!r}.")
 
@@ -335,12 +391,16 @@ def _parse_localized_decimal(
         int_raw, frac_raw = parts
         if not frac_raw or not (frac_raw.isascii() and frac_raw.isdigit()):
             raise PreprocessError(f"Malformed fractional digits in {raw_value!r}.")
-        int_digits = _validate_integer_grouping(int_raw, grp_sep, raw_value)
+        int_digits = _validate_integer_grouping(
+            int_raw, grp_sep, locale_spec.grouping, raw_value
+        )
         if not int_digits:
             int_digits = "0"
         canonical = f"{sign}{int_digits}.{frac_raw}"
     else:
-        int_digits = _validate_integer_grouping(s, grp_sep, raw_value)
+        int_digits = _validate_integer_grouping(
+            s, grp_sep, locale_spec.grouping, raw_value
+        )
         if not int_digits:
             raise PreprocessError(f"Invalid numeric value {raw_value!r}.")
         canonical = f"{sign}{int_digits}"
@@ -361,15 +421,18 @@ def parse_currency_amount(
     expected_currency: str | None = None,
     input_locale: str | None = None,
 ) -> ParsedAmount:
-    """Parse and validate a numeric or currency string into an exact ``Decimal`` amount.
+    """Parse and validate a numeric or currency value into an exact ``Decimal`` amount.
 
-    Recognizes ISO 4217 codes and common currency symbols on either side of the
-    amount (with or without standard/NBSP/narrow-NBSP whitespace), resolves
-    locale-specific decimal and grouping separators via Babel/CLDR, and validates
-    the entire remaining amount as a ``Decimal``.
+    Native numeric inputs (``int``, ``float``, ``Decimal``) preserve their numeric
+    value directly without locale string re-parsing. String inputs recognize ISO 4217
+    codes and CLDR currency symbols on either side (with or without spaces including
+    NBSP/narrow-NBSP), resolve locale-specific decimal & grouping rules via Babel,
+    and validate the entire remaining amount as ``Decimal``.
     """
     locale_spec = resolve_locale_spec(input_locale)
-    exp_iso, _ = _resolve_expected_currency(expected_currency)
+    expected_iso = validate_configured_currency(
+        expected_currency, input_locale=input_locale
+    )
 
     if isinstance(value, bool) or value is None:
         raise PreprocessError(f"Invalid numeric value: {value!r}")
@@ -377,10 +440,10 @@ def parse_currency_amount(
     if isinstance(value, Decimal):
         if not value.is_finite():
             raise PreprocessError(f"Non-finite numeric value: {value!r}")
-        return ParsedAmount(amount=value, currency=exp_iso)
+        return ParsedAmount(amount=value, currency=expected_iso)
 
     if isinstance(value, int):
-        return ParsedAmount(amount=Decimal(value), currency=exp_iso)
+        return ParsedAmount(amount=Decimal(value), currency=expected_iso)
 
     if isinstance(value, float):
         try:
@@ -389,9 +452,9 @@ def parse_currency_amount(
             raise PreprocessError(f"Non-finite numeric value: {value!r}") from exc
         if not dec.is_finite():
             raise PreprocessError(f"Non-finite numeric value: {value!r}")
-        return ParsedAmount(amount=dec, currency=exp_iso)
+        return ParsedAmount(amount=dec, currency=expected_iso)
 
-    text = str(value).strip(_CURRENCY_SPACE_CHARS)
+    text = str(value).strip(_CURRENCY_SPACE_CHARS).replace("\u2212", "-")
     if not text:
         raise PreprocessError("Empty string is not a valid numeric value.")
 
@@ -401,17 +464,18 @@ def parse_currency_amount(
         if not text:
             raise PreprocessError(f"Invalid numeric value {value!r}.")
 
-    # Optional leading sign placed before a leading currency marker (e.g. '-$100', '-USD 100')
+    symbol_map = _effective_symbol_map(locale_spec, expected_iso=expected_iso)
+
+    # Optional leading sign placed before a leading currency marker (e.g. '-$100', '-R$ 100')
     outer_sign = ""
     work = text
     if work[0] in "+-":
-        # Check if sign precedes a currency marker rather than directly preceding digits
         after_sign = work[1:].lstrip(_CURRENCY_SPACE_CHARS)
-        if _match_leading_marker(after_sign) is not None:
+        if _match_leading_marker(after_sign, symbol_map) is not None:
             outer_sign = work[0]
             work = after_sign
 
-    lead_match = _match_leading_marker(work)
+    lead_match = _match_leading_marker(work, symbol_map)
     marker: str | None = None
     candidates: frozenset[str] | None = None
     body = work
@@ -419,13 +483,10 @@ def parse_currency_amount(
     if lead_match is not None:
         marker, candidates, body = lead_match
         body = body.strip(_CURRENCY_SPACE_CHARS)
-        # Reject conflicting/duplicate trailing currency marker (e.g. 'USD 100 EUR')
-        if _match_trailing_marker(body) is not None:
-            raise PreprocessError(
-                f"Multiple currency markers found in {value!r}."
-            )
+        if _match_trailing_marker(body, symbol_map) is not None:
+            raise PreprocessError(f"Multiple currency markers found in {value!r}.")
     else:
-        trail_match = _match_trailing_marker(work)
+        trail_match = _match_trailing_marker(work, symbol_map)
         if trail_match is not None:
             marker, candidates, body = trail_match
             body = body.strip(_CURRENCY_SPACE_CHARS)
@@ -433,7 +494,7 @@ def parse_currency_amount(
     resolved_currency = _resolve_currency(
         marker,
         candidates,
-        expected_currency=expected_currency,
+        expected_iso=expected_iso,
         locale_spec=locale_spec,
         raw_value=value,
     )

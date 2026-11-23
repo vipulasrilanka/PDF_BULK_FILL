@@ -169,19 +169,20 @@ class WorkbookStore:
         self._indexes[cache_key] = index
         return index
 
-    def lookup(
+    def lookup_raw(
         self,
         file_name: str,
         sheet_name: str,
         primary_key: Any,
         key_col: str,
         value_col: str,
-    ) -> str | None:
-        """Look up a cell value by primary key using a cached sheet index.
+    ) -> tuple[bool, Any]:
+        """Look up a raw native Excel cell value by primary key using a cached sheet index.
 
         Returns:
-            The string value from ``value_col`` (``""`` if the cell is empty),
-            or ``None`` if ``primary_key`` is not found in ``key_col``.
+            ``(True, raw_value)`` when ``primary_key`` is found (preserving native
+            Python ``int``, ``float``, ``Decimal``, ``datetime``, ``str``, or ``""``
+            for an empty cell), or ``(False, None)`` when ``primary_key`` is absent.
         """
         try:
             key_col_idx = column_index_from_string(key_col.strip().upper())
@@ -194,14 +195,35 @@ class WorkbookStore:
         index = self._get_or_build_index(file_name, sheet_name, key_col_idx)
         row = index.get(normalize_key(primary_key))
         if row is None:
-            return None
+            return False, None
 
         if value_col_idx - 1 >= len(row):
-            return ""
+            return True, ""
         cell_val = row[value_col_idx - 1]
         if cell_val is None:
-            return ""
-        return str(cell_val)
+            return True, ""
+        return True, cell_val
+
+    def lookup(
+        self,
+        file_name: str,
+        sheet_name: str,
+        primary_key: Any,
+        key_col: str,
+        value_col: str,
+    ) -> str | None:
+        """Look up a cell value as a string by primary key using a cached sheet index.
+
+        Returns:
+            The string value from ``value_col`` (``""`` if the cell is empty),
+            or ``None`` if ``primary_key`` is not found in ``key_col``.
+        """
+        found, raw_val = self.lookup_raw(
+            file_name, sheet_name, primary_key, key_col, value_col
+        )
+        if not found:
+            return None
+        return str(raw_val)
 
     def close(self) -> None:
         """Close all loaded workbooks and clear cached indexes."""

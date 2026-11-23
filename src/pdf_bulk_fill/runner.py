@@ -12,6 +12,10 @@ from typing import Any, Callable, Mapping, Sequence
 
 import pymupdf
 
+from pdf_bulk_fill.currency_parser import (
+    resolve_locale_spec,
+    validate_configured_currency,
+)
 from pdf_bulk_fill.errors import (
     ExcelLoadError,
     PdfBulkFillError,
@@ -95,8 +99,8 @@ def _resolve_raw_value(
     overlay: OverlayDefinition,
     record: RecordEntry,
     store: WorkbookStore,
-) -> str:
-    """Fetch the raw string value for a single OverlayDefinition and RecordEntry."""
+) -> Any:
+    """Fetch the native raw value (int/float/datetime/str) for one OverlayDefinition & RecordEntry."""
     content = overlay.content
 
     if "File" in content:
@@ -104,14 +108,14 @@ def _resolve_raw_value(
         sheet_name = str(content["Sheet"])
         key_col = str(content.get("PrimaryKey", content.get("PrimeryKey", "")))
         value_col = str(content["Value"])
-        value = store.lookup(file_name, sheet_name, record.key, key_col, value_col)
-        if value is None:
+        found, value = store.lookup_raw(file_name, sheet_name, record.key, key_col, value_col)
+        if not found:
             raise ExcelLoadError(
                 f"Primary key '{record.key}' not found in {file_name}[{sheet_name}:{key_col}]."
             )
         return value
 
-    return str(content.get("Text", ""))
+    return content.get("Text", "")
 
 
 def resolve_record_payload(
@@ -312,6 +316,10 @@ def run_batch(
             else tpl_settings.input_locale
         )
     )
+
+    # Validate configured locale and currency eagerly before processing or writing any PDFs
+    resolve_locale_spec(effective_locale)
+    validate_configured_currency(effective_currency, input_locale=effective_locale)
 
     active_session = session or SessionConfig(
         pdf_file=str(pdf_path),
