@@ -79,6 +79,14 @@ class TestIssue10OutputFilenameCollisions:
             ("A<B>", "User", "A\"B\"", "User"),
             ("ab", "Test", "AB", "Test"),  # Case-insensitive filesystem collision
             ("1001", "A/B", "1001", "A:B"),  # Identifier collision
+            ("Caf\u00e9", "Test", "Cafe\u0301", "Test"),  # NFC vs NFD (macOS APFS)
+            ("CAF\u00c9", "Test", "cafe\u0301", "Test"),  # Mixed case + NFC vs NFD
+            ("1001", "Caf\u00e9", "1001", "Cafe\u0301"),  # Identifier NFC vs NFD
+            ("o\u0302\u0323", "Test", "\u1ed9", "Test"),  # Multi-combining canonical equiv
+            ("Stra\u00dfe", "Test", "STRASSE", "Test"),  # Unicode casefold (ß == SS on APFS)
+            ("\u212b", "Test", "\u00c5", "Test"),  # Angstrom sign vs Latin A-ring
+            ("\u2126", "Test", "\u03a9", "Test"),  # Ohm sign vs Greek Omega
+            ("Rec", "Test.", "Rec", "Test"),  # Trailing dot collision
         ],
     )
     def test_colliding_keys_do_not_overwrite_or_report_false_success(
@@ -143,6 +151,56 @@ class TestIssue10OutputFilenameCollisions:
         assert "collision" in (summary.results[1].error or "").lower()
         assert summary.results[2].success is True
         assert (out_dir / "SAFE_KEY-Unique.pdf").exists()
+        # Only the unrelated SAFE_KEY PDF should exist in out_dir (no partial/overwritten PDF)
+        assert sorted(p.name for p in out_dir.iterdir()) == ["SAFE_KEY-Unique.pdf"]
+
+    def test_samefile_filesystem_guard_blocks_unexpected_collision(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Layer 2 defense: if OS resolves two distinct names to samefile, refuse overwrite."""
+        tpl_pdf = _make_blank_pdf(tmp_path / "blank.pdf")
+        _write_workbook(
+            tmp_path / "src.xlsx",
+            {"Data": [["Key", "Val"], ["K1", "FIRST"], ["K2", "SECOND"]]},
+        )
+        tpl_xlsx = _write_workbook(
+            tmp_path / "TEMPLATE.xlsx",
+            {
+                "Data": [
+                    ["Index", "Key", "C", "D", "Identifier"],
+                    [1, "K1", None, None, "One"],
+                    [2, "K2", None, None, "Two"],
+                ],
+                "Overlay": [
+                    ["Index", "Name", "Content", "Param", "PreProcess"],
+                    [
+                        1,
+                        "Body",
+                        "<Type=File><File=src.xlsx><Sheet=Data><PrimaryKey=A><Value=B>",
+                        "<X=50><Y=700><Font=Helvetica><FontSize=12>",
+                        None,
+                    ],
+                ],
+            },
+        )
+        out_dir = tmp_path / "out"
+        # Pre-create a hardlink/alias simulation by monkeypatching exists+samefile for K2
+        orig_exists = Path.exists
+
+        def fake_exists(self: Path) -> bool:
+            if self.name == "K2-Two.pdf":
+                return True
+            return orig_exists(self)
+
+        monkeypatch.setattr(Path, "exists", fake_exists)
+        monkeypatch.setattr("os.path.samefile", lambda a, b: True)
+
+        summary = run_batch(tpl_pdf, tpl_xlsx, out_dir, source_dir=tmp_path)
+        assert summary.succeeded == 1
+        assert summary.failed == 1
+        assert summary.results[0].success is True
+        assert summary.results[1].success is False
+        assert "collision" in (summary.results[1].error or "").lower()
 
 
 # =============================================================================

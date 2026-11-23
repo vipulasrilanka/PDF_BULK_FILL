@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import os
 import re
+import unicodedata
 from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -33,7 +35,7 @@ from pdf_bulk_fill.template_parser import (
     load_record_list,
 )
 
-_UNSAFE_FILENAME_CHARS = re.compile(r'[<>:"/\\|?*]+')
+_UNSAFE_FILENAME_CHARS = re.compile(r'[\x00-\x1f<>:"/\\|?*]+')
 
 
 @dataclass(frozen=True)
@@ -59,9 +61,20 @@ class BatchSummary:
 
 
 def sanitize_filename_part(text: str) -> str:
-    """Remove filesystem-unsafe characters from a filename segment."""
-    cleaned = _UNSAFE_FILENAME_CHARS.sub("_", str(text).strip())
+    """Normalize Unicode (NFC) and remove filesystem-unsafe characters from a filename segment."""
+    normalized = unicodedata.normalize("NFC", str(text))
+    cleaned = _UNSAFE_FILENAME_CHARS.sub("_", normalized).strip(" .")
     return cleaned or "record"
+
+
+def _canonical_filename_key(filename: str) -> str:
+    """Compute a filesystem-safe canonical caseless key (Unicode 3.13: NFD(casefold(NFD(s)))).
+
+    Detects collisions across NFC vs NFD (macOS APFS/HFS+), casefolding (e.g. ß vs SS),
+    combining-mark reordering, and ASCII case differences.
+    """
+    nfd = unicodedata.normalize("NFD", filename)
+    return unicodedata.normalize("NFD", nfd.casefold())
 
 
 def _build_record_filename(record: RecordEntry) -> str:
@@ -264,15 +277,16 @@ def run_batch(
         output_dir=str(out_dir),
     )
 
-    # Pre-detect case-insensitive output filename collisions across the batch
+    # Pre-detect canonical caseless output filename collisions across the batch
     planned_filenames = [_build_record_filename(r) for r in records]
     collision_groups: dict[str, list[RecordEntry]] = defaultdict(list)
     for rec, fname in zip(records, planned_filenames):
-        collision_groups[fname.lower()].append(rec)
+        collision_groups[_canonical_filename_key(fname)].append(rec)
 
     results: list[RecordResult] = []
     succeeded = 0
     failed = 0
+    batch_written_paths: list[Path] = []
 
     with WorkbookStore() as store:
         resolved_entries: list[SourceFileEntry] = []
@@ -313,7 +327,7 @@ def run_batch(
 
         out_dir.mkdir(parents=True, exist_ok=True)
         for record, filename in zip(records, planned_filenames):
-            colliding = collision_groups[filename.lower()]
+            colliding = collision_groups[_canonical_filename_key(filename)]
             if len(colliding) > 1:
                 conflict_desc = ", ".join(
                     f"({r.key!r}, {r.identifier!r})" for r in colliding
@@ -334,6 +348,24 @@ def run_batch(
                 continue
 
             target_pdf = out_dir / filename
+            if target_pdf.exists() and any(
+                os.path.samefile(target_pdf, prev) for prev in batch_written_paths
+            ):
+                results.append(
+                    RecordResult(
+                        key=record.key,
+                        identifier=record.identifier,
+                        output_path=None,
+                        success=False,
+                        error=(
+                            f"Output filename collision: '{filename}' resolves to an "
+                            "output file already written in this batch."
+                        ),
+                    )
+                )
+                failed += 1
+                continue
+
             record_warnings: list[str] = []
             try:
                 form_fields, text_overlays, image_overlays = resolve_record_payload(
@@ -353,6 +385,7 @@ def run_batch(
                     strict_maxlen=not allow_truncation,
                     warnings_out=record_warnings,
                 )
+                batch_written_paths.append(rendered_path)
                 results.append(
                     RecordResult(
                         key=record.key,
