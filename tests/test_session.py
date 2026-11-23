@@ -105,6 +105,9 @@ def test_load_session_non_object_json(tmp_path: Path) -> None:
         ({"pdfFileName": "f.pdf", "templateFileName": "t.xlsx", "sourceFiles": [{"name": "", "path": "/a"}]}, "name"),
         ({"pdfFileName": "f.pdf", "templateFileName": "t.xlsx", "sourceFiles": [{"name": "a.xlsx", "path": ""}]}, "path"),
         ({"pdfFileName": "f.pdf", "templateFileName": "t.xlsx", "outputDir": 123}, "outputDir"),
+        ({"pdfFileName": "f.pdf", "templateFileName": "t.xlsx", "flatten": "yes"}, "flatten"),
+        ({"pdfFileName": "f.pdf", "templateFileName": "t.xlsx", "pageIndex": True}, "pageIndex"),
+        ({"pdfFileName": "f.pdf", "templateFileName": "t.xlsx", "sourceFiles": [{"name": "a.xlsx", "path": "/a", "filePath": ""}]}, "filePath"),
     ],
 )
 def test_load_session_validation_errors(tmp_path: Path, payload: dict, match: str) -> None:
@@ -113,6 +116,34 @@ def test_load_session_validation_errors(tmp_path: Path, payload: dict, match: st
 
     with pytest.raises(SessionError, match=match):
         load_session(session_file)
+
+
+def test_session_full_options_roundtrip(tmp_path: Path) -> None:
+    session_file = tmp_path / "full_session.json"
+    original = SessionConfig(
+        pdf_file="/tpl/RR-Form.pdf",
+        template_file="/tpl/TEMPLATE.xlsx",
+        source_files=[
+            SourceFileEntry(
+                name="employees.xlsx",
+                path="/data/alt",
+                file_path="/data/alt/staff_2026.xlsx",
+            )
+        ],
+        output_dir="/data/out",
+        source_dir="/data/src",
+        image_dir="/data/imgs",
+        page_index=1,
+        flatten=True,
+        skip_missing_images=True,
+        allow_truncation=True,
+    )
+    save_session(session_file, original)
+    loaded = load_session(session_file)
+    assert loaded == original
+    assert resolve_source_path("employees.xlsx", loaded, "/default") == Path(
+        "/data/alt/staff_2026.xlsx"
+    )
 
 
 def test_resolve_source_path() -> None:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
@@ -61,6 +62,13 @@ def sanitize_filename_part(text: str) -> str:
     """Remove filesystem-unsafe characters from a filename segment."""
     cleaned = _UNSAFE_FILENAME_CHARS.sub("_", str(text).strip())
     return cleaned or "record"
+
+
+def _build_record_filename(record: RecordEntry) -> str:
+    return (
+        f"{sanitize_filename_part(record.key)}"
+        f"-{sanitize_filename_part(record.identifier)}.pdf"
+    )
 
 
 def _resolve_raw_value(
@@ -156,6 +164,8 @@ def render_record_pdf(
     flatten: bool = False,
     image_base_dir: str | Path | None = None,
     skip_missing_images: bool = False,
+    strict_unknown_fields: bool = True,
+    strict_maxlen: bool = True,
     warnings_out: list[str] | None = None,
 ) -> Path:
     """Render a single output PDF combining images, coordinate text, and AcroForm fields."""
@@ -184,8 +194,18 @@ def render_record_pdf(
             apply_text_overlays_to_page(page, text_overlays)
 
         if form_fields:
-            expanded = expand_comb_groups(form_fields)
-            apply_form_fields_to_page(page, expanded)
+            expanded = expand_comb_groups(
+                form_fields,
+                strict=strict_maxlen,
+                warnings_out=warnings_out,
+            )
+            apply_form_fields_to_page(
+                page,
+                expanded,
+                strict_maxlen=strict_maxlen,
+                strict_unknown_fields=strict_unknown_fields,
+                warnings_out=warnings_out,
+            )
 
         if flatten:
             doc.bake(annots=False, widgets=True)
@@ -209,6 +229,8 @@ def run_batch(
     page_index: int = 0,
     flatten: bool = False,
     skip_missing_images: bool = False,
+    strict_unknown_fields: bool = True,
+    allow_truncation: bool = False,
     record_sheet: str = DEFAULT_RECORD_SHEET,
     overlay_sheet: str = DEFAULT_OVERLAY_SHEET,
     password_provider: Callable[[str], str | None] | None = None,
@@ -219,8 +241,17 @@ def run_batch(
     pdf_path = Path(pdf_template)
     tpl_path = Path(template_excel)
     out_dir = Path(output_dir)
-    default_src_dir = Path(source_dir) if source_dir is not None else tpl_path.parent
-    img_base_dir = Path(image_dir) if image_dir is not None else default_src_dir
+
+    effective_source_dir = (
+        Path(source_dir)
+        if source_dir is not None
+        else (Path(session.source_dir) if session and session.source_dir else tpl_path.parent)
+    )
+    effective_image_dir = (
+        Path(image_dir)
+        if image_dir is not None
+        else (Path(session.image_dir) if session and session.image_dir else effective_source_dir)
+    )
 
     records = load_record_list(tpl_path, sheet_name=record_sheet)
     overlays = load_overlay_definitions(tpl_path, sheet_name=overlay_sheet)
@@ -233,6 +264,12 @@ def run_batch(
         output_dir=str(out_dir),
     )
 
+    # Pre-detect case-insensitive output filename collisions across the batch
+    planned_filenames = [_build_record_filename(r) for r in records]
+    collision_groups: dict[str, list[RecordEntry]] = defaultdict(list)
+    for rec, fname in zip(records, planned_filenames):
+        collision_groups[fname.lower()].append(rec)
+
     results: list[RecordResult] = []
     succeeded = 0
     failed = 0
@@ -240,7 +277,7 @@ def run_batch(
     with WorkbookStore() as store:
         resolved_entries: list[SourceFileEntry] = []
         for file_name in required_files:
-            candidate = resolve_source_path(file_name, active_session, default_src_dir)
+            candidate = resolve_source_path(file_name, active_session, effective_source_dir)
             if not candidate.exists() and file_locator is not None:
                 located = file_locator(file_name)
                 if located:
@@ -250,8 +287,13 @@ def run_batch(
                 alias=file_name,
                 password_provider=password_provider,
             )
+            resolved_path = candidate.resolve()
             resolved_entries.append(
-                SourceFileEntry(name=file_name, path=str(candidate.resolve().parent))
+                SourceFileEntry(
+                    name=file_name,
+                    path=str(resolved_path.parent),
+                    file_path=str(resolved_path),
+                )
             )
 
         if save_session_path is not None:
@@ -260,15 +302,37 @@ def run_batch(
                 template_file=str(tpl_path.resolve()),
                 source_files=resolved_entries,
                 output_dir=str(out_dir.resolve()),
+                source_dir=str(effective_source_dir.resolve()),
+                image_dir=str(effective_image_dir.resolve()),
+                page_index=page_index,
+                flatten=flatten,
+                skip_missing_images=skip_missing_images,
+                allow_truncation=allow_truncation,
             )
             save_session(save_session_path, updated_session)
 
         out_dir.mkdir(parents=True, exist_ok=True)
-        for record in records:
-            filename = (
-                f"{sanitize_filename_part(record.key)}"
-                f"-{sanitize_filename_part(record.identifier)}.pdf"
-            )
+        for record, filename in zip(records, planned_filenames):
+            colliding = collision_groups[filename.lower()]
+            if len(colliding) > 1:
+                conflict_desc = ", ".join(
+                    f"({r.key!r}, {r.identifier!r})" for r in colliding
+                )
+                results.append(
+                    RecordResult(
+                        key=record.key,
+                        identifier=record.identifier,
+                        output_path=None,
+                        success=False,
+                        error=(
+                            f"Output filename collision: '{filename}' is targeted by "
+                            f"multiple records: {conflict_desc}."
+                        ),
+                    )
+                )
+                failed += 1
+                continue
+
             target_pdf = out_dir / filename
             record_warnings: list[str] = []
             try:
@@ -283,8 +347,10 @@ def run_batch(
                     image_overlays=image_overlays,
                     page_index=page_index,
                     flatten=flatten,
-                    image_base_dir=img_base_dir,
+                    image_base_dir=effective_image_dir,
                     skip_missing_images=skip_missing_images,
+                    strict_unknown_fields=strict_unknown_fields,
+                    strict_maxlen=not allow_truncation,
                     warnings_out=record_warnings,
                 )
                 results.append(

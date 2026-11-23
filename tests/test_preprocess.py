@@ -7,6 +7,7 @@ from datetime import datetime
 import pytest
 
 from pdf_bulk_fill import (
+    PreprocessError,
     apply_preprocess,
     extract_number,
     format_currency,
@@ -21,7 +22,8 @@ def test_extract_number() -> None:
     assert extract_number(42, int) == 42
     assert extract_number(3.14, float) == 3.14
     assert extract_number("Rs. 12,345.67", float) == 12345.67
-    assert extract_number("no digits", float) == 0.0
+    with pytest.raises(PreprocessError):
+        extract_number("no digits", float)
 
 
 def test_format_date() -> None:

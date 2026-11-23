@@ -154,13 +154,28 @@ def resolve_image_file(
     elif loc_path is not None:
         if loc_path.is_absolute():
             candidates.append(loc_path / name_path)
-        else:
-            if base_path is not None:
+        elif base_path is not None:
+            resolved_base = base_path.resolve()
+            primary = (base_path / loc_path / name_path).resolve()
+            if primary.is_relative_to(resolved_base):
                 candidates.append(base_path / loc_path / name_path)
-                if base_path.name == loc_path.name:
+            if base_path.name == loc_path.name:
+                dedup = (base_path / name_path).resolve()
+                if dedup.is_relative_to(resolved_base):
                     candidates.append(base_path / name_path)
+            if not candidates:
+                raise ImageOverlayError(
+                    f"Image location '{location}' escapes configured image directory '{base_path}'."
+                )
+        else:
             candidates.append(loc_path / name_path)
     elif base_path is not None:
+        resolved_base = base_path.resolve()
+        candidate = (base_path / name_path).resolve()
+        if not candidate.is_relative_to(resolved_base):
+            raise ImageOverlayError(
+                f"Image path '{file_name}' escapes configured image directory '{base_path}'."
+            )
         candidates.append(base_path / name_path)
     else:
         candidates.append(name_path)

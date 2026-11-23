@@ -51,24 +51,32 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--page",
         type=int,
-        default=0,
+        default=None,
         help="Zero-based page index in the PDF template (default: 0).",
     )
     parser.add_argument(
         "--flatten",
-        action="store_true",
+        action=argparse.BooleanOptionalAction,
+        default=None,
         help="Flatten AcroForm widgets into static print-ready content.",
     )
     parser.add_argument(
         "--skip-missing-images",
-        action="store_true",
+        action=argparse.BooleanOptionalAction,
+        default=None,
         help="Skip missing image overlays instead of failing the record.",
+    )
+    parser.add_argument(
+        "--allow-truncation",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Truncate overlength AcroForm values with warnings instead of failing the record.",
     )
     parser.add_argument(
         "--save-session",
         type=str,
         default=None,
-        help="Optional path to save resolved session paths as JSON.",
+        help="Optional path to save resolved session paths and options as JSON.",
     )
     parser.add_argument(
         "--gui",
@@ -95,6 +103,36 @@ def main(argv: Sequence[str] | None = None) -> int:
             or (session.output_dir if session and session.output_dir else None)
             or "data/output"
         )
+        source_dir = (
+            args.source_dir
+            if args.source_dir is not None
+            else (session.source_dir if session else None)
+        )
+        image_dir = (
+            args.image_dir
+            if args.image_dir is not None
+            else (session.image_dir if session else None)
+        )
+        page_index = (
+            args.page
+            if args.page is not None
+            else (session.page_index if session else 0)
+        )
+        flatten = (
+            args.flatten
+            if args.flatten is not None
+            else (session.flatten if session else False)
+        )
+        skip_missing_images = (
+            args.skip_missing_images
+            if args.skip_missing_images is not None
+            else (session.skip_missing_images if session else False)
+        )
+        allow_truncation = (
+            args.allow_truncation
+            if args.allow_truncation is not None
+            else (session.allow_truncation if session else False)
+        )
 
         use_gui = args.gui or (not args.session and not pdf_file and not template_file)
         if use_gui:
@@ -115,11 +153,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             template_file,
             output_dir,
             session=session,
-            source_dir=args.source_dir,
-            image_dir=args.image_dir,
-            page_index=args.page,
-            flatten=args.flatten,
-            skip_missing_images=args.skip_missing_images,
+            source_dir=source_dir,
+            image_dir=image_dir,
+            page_index=page_index,
+            flatten=flatten,
+            skip_missing_images=skip_missing_images,
+            allow_truncation=allow_truncation,
             password_provider=prompt_password if use_gui else None,
             file_locator=(
                 (lambda fname: pick_excel_file(f"Locate {fname}", Path.cwd()))
@@ -137,6 +176,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 print(f"  [OK]   {item.key} -> {item.output_path}")
             else:
                 print(f"  [FAIL] {item.key} ({item.identifier}): {item.error}", file=sys.stderr)
+            for warning in item.warnings:
+                print(f"  [WARN] {item.key}: {warning}", file=sys.stderr)
 
         return 0 if summary.failed == 0 else 1
     except PdfBulkFillError as exc:

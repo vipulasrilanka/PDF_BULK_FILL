@@ -21,6 +21,10 @@ class TemplateParseError(PdfBulkFillError):
     """Raised when parsing TEMPLATE.xlsx fails."""
 
 
+class PreprocessError(PdfBulkFillError):
+    """Raised when preprocessing a field value (e.g. number/currency) fails."""
+
+
 class PdfRenderError(PdfBulkFillError):
     """Raised when filling or rendering a PDF fails."""
 

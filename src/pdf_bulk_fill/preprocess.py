@@ -2,24 +2,66 @@
 
 from __future__ import annotations
 
+import math
 import re
 from datetime import datetime
 from typing import Any, Callable, Sequence
 
 from num2words import num2words
 
-_NUMBER_PATTERN = re.compile(r"-?[\d,]+\.\d+|-?[\d,]+")
+from pdf_bulk_fill.errors import PreprocessError
+
+# Matches signed numbers with optional comma grouping, leading decimals (.50),
+# and scientific notation (1e-05, 2.5E+3). Requires at least one digit.
+_NUMBER_PATTERN = re.compile(
+    r"[+-]?(?:\d[\d,]*(?:\.\d+)?|\.\d+)(?:[eE][+-]?\d+)?"
+)
 
 
 def extract_number(value: Any, cast: Callable[[float], Any] = float) -> Any:
-    """Extract a numeric value from an int, float, or formatted string."""
+    """Extract a numeric value from an int, float, or formatted string.
+
+    Raises:
+        PreprocessError: If ``value`` does not contain a valid finite number.
+    """
+    if isinstance(value, bool) or value is None:
+        raise PreprocessError(f"Invalid numeric value: {value!r}")
     if isinstance(value, (int, float)):
+        if not math.isfinite(value):
+            raise PreprocessError(f"Non-finite numeric value: {value!r}")
         return cast(value)
-    match = _NUMBER_PATTERN.search(str(value))
-    if match:
-        parsed = float(match.group().replace(",", ""))
-    else:
-        parsed = 0.0
+
+    raw_text = str(value).strip()
+    if not raw_text:
+        raise PreprocessError("Empty string is not a valid numeric value.")
+
+    # Fast path: clean direct numeric string (handles 1e-05, .50, -1,234.50, etc.)
+    cleaned_direct = raw_text.replace(",", "")
+    if ",," not in raw_text and not raw_text.startswith(",") and not raw_text.endswith(","):
+        try:
+            direct_val = float(cleaned_direct)
+            if not math.isfinite(direct_val):
+                raise PreprocessError(f"Non-finite numeric value: {value!r}")
+            return cast(direct_val)
+        except ValueError:
+            pass
+
+    # Fallback: extract single embedded numeric token (e.g., "Rs. 1,234.50", "USD .50")
+    matches = _NUMBER_PATTERN.findall(raw_text)
+    if len(matches) != 1:
+        raise PreprocessError(f"Could not extract a valid number from {value!r}.")
+
+    token = matches[0]
+    if ",," in token or token.endswith(","):
+        raise PreprocessError(f"Malformed numeric grouping in {value!r}.")
+
+    try:
+        parsed = float(token.replace(",", ""))
+    except ValueError as exc:
+        raise PreprocessError(f"Invalid numeric value {value!r}: {exc}") from exc
+
+    if not math.isfinite(parsed):
+        raise PreprocessError(f"Non-finite numeric value: {value!r}")
     return cast(parsed)
 
 
@@ -50,6 +92,16 @@ def format_date(date_string: Any, fmt: str | None = "%Y/%m/%d") -> str:
     return date_string
 
 
+def _parse_decimal_places(decimal_points: Any) -> int:
+    try:
+        decimals = int(decimal_points)
+    except (TypeError, ValueError) as exc:
+        raise PreprocessError(f"Invalid decimal places specification: {decimal_points!r}") from exc
+    if decimals < 0:
+        raise PreprocessError(f"Decimal places must be non-negative: {decimals}")
+    return decimals
+
+
 def format_number(
     value: Any,
     decimal_points: int = 2,
@@ -58,7 +110,7 @@ def format_number(
 ) -> str:
     """Format a number with thousands separators, fixed decimals, prefix, and suffix."""
     num = extract_number(value, float)
-    decimals = int(decimal_points)
+    decimals = _parse_decimal_places(decimal_points)
     return f"{prefix}{num:,.{decimals}f}{suffix}"
 
 
@@ -69,7 +121,7 @@ def format_currency(
 ) -> str:
     """Format a number as currency with thousands separators."""
     num = extract_number(value, float)
-    decimals = int(decimal_points)
+    decimals = _parse_decimal_places(decimal_points)
     return f"{currency} {num:,.{decimals}f}".strip()
 
 
@@ -102,14 +154,14 @@ def apply_preprocess(text: Any, preprocess_spec: dict[str, Any] | None) -> str:
     if name == "NumberToCurrency":
         return format_currency(
             text_str,
-            decimal_points=int(func.get("param2", 2)),
+            decimal_points=func.get("param2", 2),
             currency=str(func.get("param3", "")),
         )
 
     if name == "FormatNumber":
         return format_number(
             text_str,
-            decimal_points=int(func.get("param2", 2)),
+            decimal_points=func.get("param2", 2),
             prefix=str(func.get("param3", "")),
             suffix=str(func.get("param4", "")),
         )
@@ -195,8 +247,6 @@ def split_for_comb(
             raise ValueError(
                 f"Text exceeds comb capacity {list(box_lengths)}: remaining {words[word_idx:]!r}"
             )
-        # Try filling any remaining space on the last line if we stopped early
-        # (already full in normal packing; leftover words are truncated)
 
     while len(lines) < len(box_lengths):
         lines.append("")

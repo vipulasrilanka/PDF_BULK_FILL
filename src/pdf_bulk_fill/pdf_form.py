@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
@@ -9,6 +10,8 @@ import pymupdf
 
 from pdf_bulk_fill.errors import PdfRenderError
 from pdf_bulk_fill.preprocess import split_for_comb
+
+logger = logging.getLogger(__name__)
 
 # Multi-line comb groups for RR-Form.pdf
 RR_FORM_COMB_GROUPS: dict[str, tuple[list[str], list[int]]] = {
@@ -42,18 +45,40 @@ def expand_comb_groups(
     *,
     uppercase: bool = True,
     strict: bool = False,
+    warnings_out: list[str] | None = None,
 ) -> dict[str, Any]:
     """Expand high-level multi-line keys (e.g. ``FullName``) into individual comb fields."""
     expanded: dict[str, Any] = {}
     for key, value in field_values.items():
         if key in comb_groups:
             target_fields, box_lengths = comb_groups[key]
-            lines = split_for_comb(
-                "" if value is None else str(value),
-                box_lengths,
-                uppercase=uppercase,
-                strict=strict,
-            )
+            text_val = "" if value is None else str(value)
+            try:
+                lines = split_for_comb(
+                    text_val,
+                    box_lengths,
+                    uppercase=uppercase,
+                    strict=True,
+                )
+            except ValueError as exc:
+                if strict:
+                    raise PdfRenderError(
+                        f"Value for field '{key}' exceeds comb box capacity "
+                        f"{list(box_lengths)} ({sum(box_lengths)} max chars): {exc}"
+                    ) from exc
+                lines = split_for_comb(
+                    text_val,
+                    box_lengths,
+                    uppercase=uppercase,
+                    strict=False,
+                )
+                msg = (
+                    f"Truncated comb group '{key}' to fit capacity "
+                    f"{list(box_lengths)} ({sum(box_lengths)} max chars): {exc}"
+                )
+                logger.warning(msg)
+                if warnings_out is not None:
+                    warnings_out.append(msg)
             for field_name, line_val in zip(target_fields, lines):
                 expanded[field_name] = line_val
         else:
@@ -104,6 +129,7 @@ def apply_form_fields_to_page(
     *,
     strict_maxlen: bool = False,
     strict_unknown_fields: bool = False,
+    warnings_out: list[str] | None = None,
 ) -> dict[str, Any]:
     """Populate AcroForm widgets on an open PyMuPDF page in place.
 
@@ -115,7 +141,11 @@ def apply_form_fields_to_page(
     if strict_unknown_fields:
         unknown = sorted(set(field_values.keys()) - known_names)
         if unknown:
-            raise PdfRenderError(f"Unknown PDF form field(s): {', '.join(unknown)}")
+            available = ", ".join(sorted(known_names)) if known_names else "(none)"
+            raise PdfRenderError(
+                f"Unknown PDF form field(s): {', '.join(unknown)}. "
+                f"Available fields: {available}."
+            )
 
     applied: dict[str, Any] = {}
     for widget in widgets:
@@ -140,7 +170,15 @@ def apply_form_fields_to_page(
                         f"Value for field '{name}' ({len(text_val)} chars) exceeds "
                         f"MaxLen of {max_len}."
                     )
+                original_len = len(text_val)
                 text_val = text_val[:max_len]
+                msg = (
+                    f"Truncated field '{name}' from {original_len} to {max_len} chars "
+                    f"(saved as {text_val!r})."
+                )
+                logger.warning(msg)
+                if warnings_out is not None:
+                    warnings_out.append(msg)
             widget.field_value = text_val
             widget.update()
             applied[name] = text_val
@@ -158,29 +196,17 @@ def fill_acroform(
     strict_maxlen: bool = False,
     strict_unknown_fields: bool = False,
     expand_groups: bool = True,
+    warnings_out: list[str] | None = None,
 ) -> dict[str, Any]:
-    """Fill AcroForm comb text fields and checkboxes in a PDF and save to ``output_pdf``.
-
-    Args:
-        template_pdf: Path to the source PDF form (e.g., ``RR-Form.pdf``).
-        output_pdf: Destination path for the filled PDF.
-        field_values: Mapping of PDF field names (or comb group keys like ``FullName``)
-            to values.
-        page_index: Zero-based page index containing the form widgets.
-        flatten: If True, bakes widget appearances into static page content (print-ready).
-        strict_maxlen: If True, raises ``PdfRenderError`` when a value exceeds ``MaxLen``.
-        strict_unknown_fields: If True, raises ``PdfRenderError`` on unknown field names.
-        expand_groups: If True, expands keys in ``RR_FORM_COMB_GROUPS`` automatically.
-
-    Returns:
-        Dictionary of ``{field_name: applied_value}``.
-    """
+    """Fill AcroForm comb text fields and checkboxes in a PDF and save to ``output_pdf``."""
     src_path = Path(template_pdf)
     if not src_path.exists():
         raise PdfRenderError(f"PDF template not found: {src_path}")
 
     resolved_values = (
-        expand_comb_groups(field_values, strict=strict_maxlen)
+        expand_comb_groups(
+            field_values, strict=strict_maxlen, warnings_out=warnings_out
+        )
         if expand_groups
         else dict(field_values)
     )
@@ -198,6 +224,7 @@ def fill_acroform(
             resolved_values,
             strict_maxlen=strict_maxlen,
             strict_unknown_fields=strict_unknown_fields,
+            warnings_out=warnings_out,
         )
 
         if flatten:

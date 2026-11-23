@@ -6,6 +6,7 @@ from pdf_bulk_fill.errors import (
     ImageOverlayError,
     PdfBulkFillError,
     PdfRenderError,
+    PreprocessError,
     SessionError,
     TemplateParseError,
 )
@@ -81,6 +82,7 @@ __all__ = [
     "ExcelLoadError",
     "EncryptedFileError",
     "TemplateParseError",
+    "PreprocessError",
     "PdfRenderError",
     "ImageOverlayError",
     "SourceFileEntry",
